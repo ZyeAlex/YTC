@@ -1,0 +1,131 @@
+.cron-picker {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+  overflow: hidden;
+}
+
+.cron-picker-panel {
+  padding: 14px 16px;
+}
+
+.cron-picker-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.cron-picker-option:last-child {
+  margin-bottom: 0;
+}
+
+.cron-picker-option input[type="radio"] {
+  margin-top: 3px;
+  margin-right: 5px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.cron-picker-option-body {
+  flex: 1;
+  line-height: 1.6;
+}
+
+.cron-picker-option-body label {
+  cursor: pointer;
+}
+
+.cron-picker-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cron-picker-num {
+  width: 56px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.84rem;
+}
+
+.cron-picker-num:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.cron-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+  max-width: 420px;
+}
+
+.cron-picker-chip {
+  padding: 4px 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.cron-picker-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.cron-picker-chip.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.cron-picker-foot {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.cron-picker-expr {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: "DM Sans", "Noto Sans SC", monospace;
+  font-size: 0.88rem;
+}
+
+.cron-picker-expr:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.cron-picker-expr.invalid {
+  border-color: var(--error);
+}
+
+.cron-picker-desc {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.cron-picker-desc.error {
+  color: var(--error);
+}

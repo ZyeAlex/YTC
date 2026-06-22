@@ -1,0 +1,19 @@
+{
+  "name": "tencent-channel-cli",
+  "version": "1.0.7",
+  "description": "腾讯频道 CLI 工具",
+  "bin": {
+    "tencent-channel-cli": "bin/tencent-channel-cli"
+  },
+  "files": ["bin/"],
+  "optionalDependencies": {
+    "tencent-channel-cli-darwin-arm64": "1.0.7",
+    "tencent-channel-cli-darwin-x64": "1.0.7",
+    "tencent-channel-cli-linux-arm64": "1.0.7",
+    "tencent-channel-cli-linux-x64": "1.0.7",
+    "tencent-channel-cli-win32-x64": "1.0.7"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  }
+}

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+downloads/
+cache/
+config/config.json
+config/config.json.bak
+config/users.json
+config/users/
+skills/douyin-search-keyword/logs/
+.DS_Store

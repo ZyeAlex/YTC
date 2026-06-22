@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>腾讯频道发帖工具</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/cron-picker.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=32" />
+</head>
+<body>
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-card">
+      <div class="brand-icon login-brand">频</div>
+      <h1>频道自动发帖点赞控制台</h1>
+      <p class="login-desc">请输入 Token</p>
+      <input type="password" id="loginToken" class="login-input" placeholder="请输入 Token" autocomplete="current-password" />
+      <p id="loginError" class="login-error hidden"></p>
+      <button type="button" id="loginBtn" class="btn btn-primary login-btn">登录</button>
+    </div>
+  </div>
+
+  <div class="app-shell hidden">
+    <!-- 左侧：任务列表 -->
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="brand-mini">
+          <div class="brand-icon">频</div>
+          <span>发帖控制台</span>
+        </div>
+        <div class="sidebar-actions">
+        <button id="newTaskBtn" class="btn btn-new">+ 新建任务</button>
+        </div>
+      </div>
+      <div id="sidebarTaskList" class="sidebar-tasks">
+        <div class="empty-hint">暂无任务</div>
+      </div>
+      <nav class="sidebar-footer-nav" aria-label="主导航">
+        <button type="button" id="sidebarNavTasks" class="sidebar-nav-btn active" title="任务列表">
+          <span class="nav-icon" aria-hidden="true">📋</span>
+          <span>任务</span>
+        </button>
+        <button type="button" id="sidebarNavAutoLike" class="sidebar-nav-btn" title="自动点赞">
+          <span class="nav-icon" aria-hidden="true">👍</span>
+          <span>点赞</span>
+        </button>
+        <button type="button" id="sidebarNavSettings" class="sidebar-nav-btn" title="设置">
+          <span class="nav-icon" aria-hidden="true">⚙</span>
+          <span>设置</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- 右侧：任务详情 -->
+    <main class="main-panel">
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">📋</div>
+        <h2>选择或创建任务</h2>
+        <p>左侧选择已有任务，或点击「新建任务」开始</p>
+      </div>
+
+      <div id="taskDetail" class="task-detail page-view hidden">
+        <header class="detail-header">
+          <div class="detail-title-block">
+            <div class="detail-meta-row">
+              <span id="detailKindBadge" class="task-kind-badge"></span>
+              <span id="detailStatus" class="task-badge"></span>
+            </div>
+            <h1 id="detailName">-</h1>
+          </div>
+          <div class="detail-actions">
+            <button id="appendLinksBtn" class="btn btn-secondary btn-sm hidden">追加链接</button>
+            <button id="syncCollectionBtn" class="btn btn-secondary btn-sm hidden">同步收藏</button>
+            <button id="editTaskBtn" class="btn btn-secondary btn-sm hidden">修改</button>
+            <button id="startTaskBtn" class="btn btn-primary btn-sm hidden">启动</button>
+            <button id="pauseTaskBtn" class="btn btn-secondary btn-sm hidden">暂停</button>
+            <button id="deleteTaskBtn" class="btn btn-danger btn-sm">删除</button>
+          </div>
+        </header>
+
+        <section class="content-panel info-panel">
+          <div class="info-grid" id="infoGrid"></div>
+        </section>
+
+        <div class="detail-split">
+          <section class="content-panel">
+            <div class="panel-head">
+              <h3>视频发送进度</h3>
+            </div>
+            <div id="videoProgressPanel" class="video-progress-panel">
+              <div id="videoProgressList" class="progress-list"></div>
+              <div id="videoProgressDoneWrap" class="progress-done-wrap hidden">
+                <button type="button" id="toggleDoneVideosBtn" class="progress-done-toggle" aria-expanded="false">
+                  <span id="doneVideosToggleLabel">已发完 0 条</span>
+                  <span class="progress-done-chevron" aria-hidden="true">›</span>
+                </button>
+                <div id="videoProgressDoneList" class="progress-list progress-done-list hidden"></div>
+              </div>
+            </div>
+          </section>
+          <section class="content-panel">
+            <div class="panel-head">
+              <h3>运行日志</h3>
+            </div>
+            <div id="taskRunLogs" class="run-logs task-run-logs"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 自动点赞（右侧主区域） -->
+      <div id="autoLikeView" class="auto-like-view page-view hidden">
+        <header class="detail-header">
+          <div class="detail-title-block">
+            <h1>自动点赞</h1>
+            <p class="page-subtitle">按频道配置点赞规则与 Cron 计划</p>
+          </div>
+        </header>
+        <div class="auto-like-layout">
+          <aside class="auto-like-menu">
+            <div class="auto-like-menu-head">
+              <span>频道</span>
+            </div>
+            <div id="autoLikeChannelMenu" class="auto-like-menu-list"></div>
+          </aside>
+          <div class="auto-like-detail">
+            <div id="autoLikeDetailEmpty" class="auto-like-empty">
+              <div class="empty-icon">👍</div>
+              <h2>暂无频道</h2>
+              <p>请先在设置中配置频道</p>
+            </div>
+            <div id="autoLikeDetailPanel" class="hidden">
+              <div class="auto-like-detail-head">
+                <h2 id="autoLikeDetailName">-</h2>
+                <div class="auto-like-detail-actions">
+                  <button type="button" id="autoLikeToggleBtn" class="btn btn-primary btn-sm">执行</button>
+                </div>
+              </div>
+              <div id="autoLikeEditForm" class="auto-like-form">
+                <div class="auto-like-grid">
+                  <label>最少点赞<input type="number" id="autoLikeChMin" min="1" value="1" /></label>
+                  <label>最多点赞<input type="number" id="autoLikeChMax" min="1" value="5" /></label>
+                </div>
+                <div class="form-block">
+                  <label class="form-label">点赞时间（Cron）</label>
+                  <div id="autoLikeCronMount"></div>
+                </div>
+                <label class="settings-row-check">
+                  <input type="checkbox" id="autoLikeChOwn" checked />
+                  <span>仅点赞本系统账号发布的帖子</span>
+                </label>
+                <details class="auto-like-accounts">
+                  <summary>参与点赞的账号</summary>
+                  <div id="autoLikeAccGrid" class="check-grid compact"></div>
+                </details>
+              </div>
+              <div id="autoLikeRunView" class="auto-like-run-view hidden">
+                <div id="autoLikeRunInfo" class="info-grid"></div>
+              </div>
+              <section class="content-panel auto-like-logs-section">
+                <div class="panel-head">
+                  <h3>运行日志</h3>
+                </div>
+                <div id="autoLikeRunLogs" class="run-logs"></div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="settingsView" class="settings-view page-view hidden">
+        <header class="detail-header">
+          <div class="detail-title-block">
+            <h1>设置</h1>
+            <p class="page-subtitle">Cookie、账号、频道与全局过滤词</p>
+          </div>
+          <div class="detail-actions">
+            <button type="button" id="logoutBtn" class="btn btn-secondary btn-sm">退出登录</button>
+          </div>
+        </header>
+        <div class="settings-body">
+          <div class="settings-panels settings-panels-cookies">
+            <section class="settings-panel">
+              <div class="settings-panel-head">
+                <h2>B站 Cookie</h2>
+                <button type="button" id="saveBiliCookiesBtn" class="btn btn-primary btn-sm hidden">保存 Cookie</button>
+              </div>
+              <p class="settings-hint">可配置多个；搜索默认用第一条，下载失败会依次尝试。</p>
+              <div class="cookie-rows-toolbar">
+                <button type="button" id="addBiliCookieBtn" class="btn btn-secondary btn-sm">+ 新增 Cookie</button>
+              </div>
+              <div id="settingsBiliCookiesList" class="cookie-rows"></div>
+            </section>
+            <section class="settings-panel">
+              <div class="settings-panel-head">
+                <h2>抖音 Cookie</h2>
+                <button type="button" id="saveDouyinCookiesBtn" class="btn btn-primary btn-sm hidden">保存 Cookie</button>
+              </div>
+              <p class="settings-hint">可配置多个；解析/下载失败会依次尝试。</p>
+              <div class="cookie-rows-toolbar">
+                <button type="button" id="addDouyinCookieBtn" class="btn btn-secondary btn-sm">+ 新增 Cookie</button>
+              </div>
+              <div id="settingsDouyinCookiesList" class="cookie-rows"></div>
+            </section>
+          </div>
+          <div class="settings-panels">
+            <section class="settings-panel">
+              <div class="settings-panel-head">
+                <h2>发帖账号</h2>
+                <div class="settings-panel-actions">
+                  <button type="button" id="openAddAccountDialogBtn" class="btn btn-secondary btn-sm">新增账号</button>
+                  <button type="button" id="saveAccountsBtn" class="btn btn-primary btn-sm hidden">保存账号</button>
+                </div>
+              </div>
+              <p class="settings-hint">JSON：qq_accounts / bot_accounts，每项含 index、name、token</p>
+              <textarea id="settingsAccountsJson" class="settings-json" spellcheck="false" rows="14"></textarea>
+            </section>
+            <section class="settings-panel">
+              <div class="settings-panel-head">
+                <h2>频道列表</h2>
+                <div class="settings-panel-actions">
+                  <button type="button" id="openAddChannelDialogBtn" class="btn btn-secondary btn-sm">新增频道</button>
+                  <button type="button" id="saveChannelsBtn" class="btn btn-primary btn-sm hidden">保存频道</button>
+                </div>
+              </div>
+              <p class="settings-hint">JSON 数组：name, guild_id, channel_id, category</p>
+              <textarea id="settingsChannelsJson" class="settings-json" spellcheck="false" rows="14"></textarea>
+            </section>
+          </div>
+          <section class="settings-panel settings-panel-full">
+            <div class="settings-panel-head">
+              <h2>过滤词</h2>
+              <button type="button" id="saveSettingsFilterBtn" class="btn btn-primary btn-sm">保存</button>
+            </div>
+            <p class="settings-hint">搜索标题过滤，每行一条正则；<code>#</code> 开头为注释。</p>
+            <textarea id="settingsFilterPatterns" class="settings-json settings-json-sm" spellcheck="false" rows="10"></textarea>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 新建任务弹窗 -->
+  <div id="taskDialog" class="modal-overlay hidden">
+    <div class="modal modal-task">
+      <div class="modal-header">
+        <h2 id="dialogTitle">新建任务</h2>
+        <button id="closeDialog" class="modal-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="dialog-source-bar">
+          <div class="platform-tabs dialog-main-tabs">
+            <button type="button" class="tab active" data-dialog-tab="bili">B站</button>
+            <button type="button" class="tab" data-dialog-tab="douyin">抖音</button>
+          </div>
+          <div class="platform-tabs dialog-sub-tabs hidden" id="douyinSubTabs">
+            <button type="button" class="tab active" data-douyin-subtab="keyword">关键词</button>
+            <button type="button" class="tab" data-douyin-subtab="collection">收藏夹</button>
+            <button type="button" class="tab" data-douyin-subtab="links">手动链接</button>
+          </div>
+        </div>
+
+        <div class="dialog-layout">
+          <div class="dialog-col dialog-col-source">
+            <div class="panel-block" id="searchSection">
+              <div class="panel-block-head">
+                <h3>搜索视频</h3>
+                <button type="button" id="dialogFilterBtn" class="link-btn">过滤词</button>
+              </div>
+              <div class="search-input-row">
+                <input type="text" id="dialogKeyword" placeholder="输入搜索关键词" />
+                <label id="dialogBiliPagesWrap" class="bili-pages-label">
+                  <span>页数</span>
+                  <select id="dialogBiliPages">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                  </select>
+                </label>
+                <label class="bili-pages-label">
+                  <span>排序</span>
+                  <select id="dialogSearchSort">
+                    <option value="default">综合</option>
+                    <option value="recent" selected>最新</option>
+                  </select>
+                </label>
+                <button id="dialogSearchBtn" class="btn btn-primary btn-sm">搜索</button>
+              </div>
+            </div>
+
+            <div class="panel-block hidden" id="collectionSection">
+              <div class="panel-block-head">
+                <h3>收藏夹</h3>
+              </div>
+              <p class="panel-hint">选择抖音账号加载收藏；长期任务发完一批后会自动同步新收藏</p>
+              <div class="search-input-row collection-row">
+                <label class="bili-pages-label collection-account-label">
+                  <span>账号</span>
+                  <select id="dialogDouyinAccount"></select>
+                </label>
+                <button type="button" id="dialogCollectionBtn" class="btn btn-primary btn-sm">加载</button>
+                <button type="button" id="dialogCollectionMoreBtn" class="btn btn-secondary btn-sm hidden">更多</button>
+                <button type="button" id="dialogCollectionAllBtn" class="btn btn-secondary btn-sm">全部</button>
+              </div>
+            </div>
+
+            <div class="panel-block hidden" id="customLinksSection">
+              <div class="panel-block-head">
+                <h3>分享文本</h3>
+              </div>
+              <p class="panel-hint">粘贴抖音 App 分享文案，自动提取 v.douyin.com 链接</p>
+              <textarea id="dialogCustomLinks" class="custom-links-input" rows="6" placeholder="粘贴分享文本，可包含多条链接…"></textarea>
+              <div class="panel-block-actions">
+                <button type="button" id="dialogParseLinksBtn" class="btn btn-primary btn-sm">解析链接</button>
+              </div>
+            </div>
+
+            <div class="panel-block panel-block-grow" id="videoSelectSection">
+              <div class="panel-block-head">
+                <h3 id="videoSelectTitle">搜索结果</h3>
+                <div class="panel-block-actions">
+                  <button type="button" class="link-btn" id="dialogSelectAllVid">全选</button>
+                  <button type="button" class="link-btn" id="dialogDeselectAllVid">清空</button>
+                </div>
+              </div>
+              <p class="panel-hint panel-hint-inline" id="videoSelectHint">点击条目选择/取消，默认全选</p>
+              <div id="dialogSearchStatus" class="status-bar hidden"></div>
+              <div id="dialogVideoList" class="dialog-video-list"></div>
+            </div>
+          </div>
+
+          <div class="dialog-col dialog-col-target">
+            <div class="panel-block">
+              <div class="panel-block-head">
+                <h3>目标频道</h3>
+                <div class="panel-block-actions">
+                  <button type="button" class="link-btn" id="dialogSelectAllCh">全选</button>
+                  <button type="button" class="link-btn" id="dialogDeselectAllCh">清空</button>
+                </div>
+              </div>
+              <div class="filter-row filter-row-compact">
+                <button type="button" class="chip active" data-dialog-cat="all">全部</button>
+                <button type="button" class="chip" data-dialog-cat="游戏">游戏</button>
+                <button type="button" class="chip" data-dialog-cat="交友">交友</button>
+              </div>
+              <div id="dialogChannelBtns" class="toggle-btn-grid"></div>
+            </div>
+
+            <div class="panel-block">
+              <div class="panel-block-head">
+                <h3>发送账号</h3>
+                <div class="panel-block-actions">
+                  <button type="button" class="link-btn" id="dialogSelectAllAcc">全选</button>
+                </div>
+              </div>
+              <div class="account-groups">
+                <div class="account-group">
+                  <div class="account-group-head">
+                    <h4>QQ 主号</h4>
+                    <button type="button" class="link-btn" id="dialogDeselectQq">清空</button>
+                  </div>
+                  <div id="dialogQqAccounts" class="check-grid compact"></div>
+                </div>
+                <div class="account-group">
+                  <div class="account-group-head">
+                    <h4>Bot 账号</h4>
+                    <button type="button" class="link-btn" id="dialogDeselectBot">清空</button>
+                  </div>
+                  <div id="dialogBotAccounts" class="check-grid compact"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel-block">
+              <div class="panel-block-head">
+                <h3>发送计划</h3>
+              </div>
+              <div id="dialogCronPicker"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer modal-footer-split">
+        <p class="dialog-footer-hint" id="dialogFooterHint">选择视频与频道后即可创建</p>
+        <div class="dialog-footer-btns">
+          <button type="button" id="dialogCancel" class="btn btn-secondary">取消</button>
+          <button type="button" id="dialogCreate" class="btn btn-send" disabled>创建任务</button>
+          <button type="button" id="dialogCreateRecurring" class="btn btn-primary" disabled>创建自动同步任务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自定义任务追加链接 -->
+  <div id="appendLinksDialog" class="modal-overlay hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>追加视频链接</h2>
+        <button id="closeAppendLinksDialog" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint-inline">粘贴抖音分享文本，解析后会追加到当前任务队列末尾</p>
+        <textarea id="appendLinksText" class="custom-links-input" rows="8" placeholder="粘贴分享文本…"></textarea>
+        <div id="appendLinksStatus" class="status-bar hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="appendLinksCancel" class="btn btn-secondary">取消</button>
+        <button id="appendLinksConfirm" class="btn btn-primary">解析并追加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新增账号弹窗 -->
+  <div id="addAccountDialog" class="modal-overlay hidden">
+    <div class="modal modal-account">
+      <div class="modal-header">
+        <h2>新增账号</h2>
+        <button id="closeAddAccountDialog" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="filter-dialog-desc">每行选择类型、填写名称与 Token，将依次加入全部频道并保存。Bot 名称可留空。</p>
+        <div class="add-account-form">
+          <div class="add-account-rows-head">
+            <span>类型</span>
+            <span>名称</span>
+            <span>Token</span>
+            <span></span>
+          </div>
+          <div id="addAccountRows" class="add-account-rows"></div>
+          <div class="add-account-add-row-bar">
+            <button type="button" id="addAccountRowBtn" class="btn btn-secondary btn-sm add-account-add-row">+ 新增账号</button>
+          </div>
+        </div>
+        <div id="addAccountProgress" class="add-account-progress hidden">
+          <div class="add-account-progress-head">
+            <span id="addAccountProgressLabel">准备中…</span>
+            <span id="addAccountProgressCount">0/0</span>
+          </div>
+          <div class="add-account-progress-bar">
+            <div id="addAccountProgressFill" class="add-account-progress-fill"></div>
+          </div>
+          <div id="addAccountProgressLog" class="add-account-progress-log"></div>
+        </div>
+        <div id="addAccountStatus" class="add-channel-status hidden"></div>
+      </div>
+      <div class="modal-footer modal-footer-single">
+        <button id="submitAddAccountsBtn" class="btn btn-primary">开始添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 新增频道弹窗 -->
+  <div id="addChannelDialog" class="modal-overlay hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>新增频道</h2>
+        <button id="closeAddChannelDialog" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="filter-dialog-desc">粘贴分享文案，将自动解析链接、用全部账号加入并保存到频道列表。</p>
+        <textarea
+          id="addChannelText"
+          class="add-channel-text"
+          spellcheck="false"
+          rows="4"
+          placeholder="例如：点击链接加入腾讯频道【XX频道】：https://pd.qq.com/s/……"
+        ></textarea>
+        <label class="add-channel-label">
+          <span>频道类型</span>
+          <select id="addChannelCategory">
+            <option value="游戏">游戏</option>
+            <option value="交友">交友</option>
+          </select>
+        </label>
+        <div id="addChannelStatus" class="add-channel-status hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="addChannelCancelBtn" class="btn btn-secondary">取消</button>
+        <button id="addChannelBtn" class="btn btn-primary">解析并加入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 过滤词设置（二级弹窗） -->
+  <div id="filterDialog" class="modal-overlay modal-nested hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>过滤词设置</h2>
+        <button id="closeFilterDialog" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="filter-dialog-desc">全局生效，所有任务搜索共用。每行一条正则，标题命中则排除；<code>#</code> 开头为注释。</p>
+        <textarea id="filterPatternsInput" rows="12" spellcheck="false" placeholder="每行一个正则表达式"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button id="filterSaveBtn" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/cron-picker.js?v=5"></script>
+  <script src="/static/app.js?v=73"></script>
+</body>
+</html>

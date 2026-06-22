@@ -1,0 +1,14 @@
+[project]
+name = "channel-poster"
+version = "1.0.0"
+description = "腾讯频道发帖 Web 工具"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.0.0",
+    "yt-dlp>=2025.1.0",
+    "croniter>=2.0.0",
+    "imageio-ffmpeg>=0.5.0",
+]
