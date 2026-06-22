@@ -15,6 +15,35 @@ OIDB_LIMIT_MARKERS = ('"code":153',)
 _own_poster_cache: dict[str, tuple[float, set[str]]] = {}
 _CACHE_TTL = 3600
 
+# 频道里常见的通用展示名，不能用于判断「本系统账号」
+_GENERIC_POSTER_NICKS = frozenset({
+    "频道用户", "频道成员", "匿名用户", "。", ".", "…",
+})
+
+
+def _is_numeric_user_id(val: Any) -> bool:
+    if val is None or val == "":
+        return False
+    text = str(val).strip()
+    return text.isdigit() and len(text) >= 6
+
+
+def _collect_numeric_user_ids(data: Any) -> set[str]:
+    """仅从用户信息 JSON 提取数字 tinyid/uin，忽略昵称字段。"""
+    ids: set[str] = set()
+    if isinstance(data, dict):
+        for key in (
+            "uin", "tiny_id", "tinyId", "tinyid", "author_id", "poster_id", "create_uin", "id",
+        ):
+            val = data.get(key)
+            if _is_numeric_user_id(val):
+                ids.add(str(val).strip())
+        for nested_key in ("data", "user", "user_info"):
+            nested = data.get(nested_key)
+            if nested:
+                ids |= _collect_numeric_user_ids(nested)
+    return ids
+
 
 def list_all_account_ids() -> list[str]:
     return [a["id"] for a in list_accounts_public()]
@@ -55,25 +84,26 @@ def _parse_feed_time(feed: dict) -> float:
 
 
 def _extract_poster_ids(feed: dict) -> set[str]:
+    """提取帖子发布者的数字 ID（tinyid/uin），不用昵称比对。"""
     ids: set[str] = set()
     author = feed.get("author")
-    if isinstance(author, str) and author.strip():
-        ids.add(author.strip())
-    elif isinstance(author, dict):
-        for key in ("id", "uin", "tiny_id", "tinyId", "nick", "name", "nickname"):
+    if isinstance(author, dict):
+        for key in ("id", "uin", "tiny_id", "tinyId"):
             val = author.get(key)
-            if val not in (None, ""):
-                ids.add(str(val))
+            if _is_numeric_user_id(val):
+                ids.add(str(val).strip())
+    elif isinstance(author, str) and _is_numeric_user_id(author):
+        ids.add(author.strip())
     poster = feed.get("poster") or feed.get("user") or {}
     if isinstance(poster, dict):
-        for key in ("id", "uin", "tiny_id", "tinyId", "nick", "name", "nickname"):
+        for key in ("id", "uin", "tiny_id", "tinyId"):
             val = poster.get(key)
-            if val not in (None, ""):
-                ids.add(str(val))
+            if _is_numeric_user_id(val):
+                ids.add(str(val).strip())
     for key in ("author_id", "create_uin", "poster_id", "tiny_id", "uin"):
         val = feed.get(key)
-        if val not in (None, ""):
-            ids.add(str(val))
+        if _is_numeric_user_id(val):
+            ids.add(str(val).strip())
     return ids
 
 
@@ -121,24 +151,11 @@ def _search_member_tinyids(token: str, guild_id: str, nickname: str) -> set[str]
 
 
 def _collect_user_ids(data: Any) -> set[str]:
-    ids: set[str] = set()
-    if isinstance(data, dict):
-        for key in (
-            "uin", "tiny_id", "tinyId", "tinyid", "id",
-            "nick", "name", "nickname", "global_nickname", "member_name", "author_id",
-        ):
-            val = data.get(key)
-            if val not in (None, ""):
-                ids.add(str(val))
-        for nested_key in ("data", "user", "user_info"):
-            nested = data.get(nested_key)
-            if nested:
-                ids |= _collect_user_ids(nested)
-    return ids
+    return _collect_numeric_user_ids(data)
 
 
 def resolve_own_poster_ids(account_ids: list[str], guild_id: str = "") -> set[str]:
-    cache_key = f"{guild_id}:{','.join(sorted(account_ids))}"
+    cache_key = f"v2:{guild_id}:{','.join(sorted(account_ids))}"
     cached = _own_poster_cache.get(cache_key)
     if cached and time.time() - cached[0] < _CACHE_TTL:
         return cached[1]
@@ -164,14 +181,14 @@ def resolve_own_poster_ids(account_ids: list[str], guild_id: str = "") -> set[st
             parsed = _parse_json_output(output)
             if parsed:
                 nicks |= _nicknames_from_user_info(parsed)
-                ids |= _collect_user_ids(parsed)
+                ids |= _collect_numeric_user_ids(parsed)
         except Exception:
             pass
 
-    ids |= {n for n in nicks if n}
-
     if guild_id and search_token:
         for nick in nicks:
+            if not nick or nick in _GENERIC_POSTER_NICKS:
+                continue
             ids |= _search_member_tinyids(search_token, guild_id, nick)
 
     _own_poster_cache[cache_key] = (time.time(), ids)
@@ -334,6 +351,16 @@ def run_auto_like_for_channel(channel_cfg: dict) -> dict[str, Any]:
     own_ids: set[str] = set()
     if only_own:
         own_ids = resolve_own_poster_ids(account_ids, guild_id)
+        if not own_ids:
+            msg = "无法解析本系统账号 ID，已跳过点赞（请检查账号 Token）"
+            return {
+                "ok": True,
+                "message": msg,
+                "total_likes": 0,
+                "feeds_processed": 0,
+                "last_liked_at": last_ts,
+                "logs": [msg],
+            }
 
     target_feeds: list[dict] = []
     for feed in candidate:

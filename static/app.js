@@ -1423,7 +1423,7 @@ function renderTaskDetail(force = false) {
     $("#copyTaskLinkBtn")?.addEventListener("click", copyTaskLink);
   }
 
-  updateVideoProgress(t.video_progress || [], force, t.status);
+  updateVideoProgress(t.video_progress || [], force, t.status, t);
   renderTaskLogs(t.logs || []);
 }
 
@@ -1445,13 +1445,26 @@ function isProgressVideoDone(vp) {
   return vp.status === "done" || vp.status === "skipped";
 }
 
-/** 任务详情列表展示：存储为新→旧，展示倒序为旧→新（旧在上） */
-function orderProgressForDisplay(videos) {
-  return [...videos].reverse();
+/** 与后端 sends_newest_last 一致：收藏 / 搜索「最新」从列表尾部往前发 */
+function shouldSendNewestLast(task) {
+  if (!task) return false;
+  if (task.source === "collection") return true;
+  if (task.source === "manual" || task.task_type === "custom") return false;
+  return (task.search_sort || "recent") === "recent";
 }
 
-function splitProgressForDisplay(videos) {
-  const ordered = orderProgressForDisplay(videos);
+/** 任务详情：按发送顺序展示（下一个要发的在最上） */
+function orderProgressForDisplay(videos, task) {
+  const n = videos.length;
+  if (!n) return [];
+  if (shouldSendNewestLast(task)) {
+    return [...videos].reverse();
+  }
+  return [...videos];
+}
+
+function splitProgressForDisplay(videos, task) {
+  const ordered = orderProgressForDisplay(videos, task);
   const active = [];
   const done = [];
   for (const v of ordered) {
@@ -1499,7 +1512,7 @@ function buildProgressCardHtml(v, i, taskStatus) {
     </div>`;
 }
 
-function renderVideoProgressFull(videos, taskStatus) {
+function renderVideoProgressFull(videos, taskStatus, task = state.taskDetail) {
   const list = $("#videoProgressList");
   const doneWrap = $("#videoProgressDoneWrap");
   const doneList = $("#videoProgressDoneList");
@@ -1514,7 +1527,7 @@ function renderVideoProgressFull(videos, taskStatus) {
     return;
   }
 
-  const { active, done } = splitProgressForDisplay(videos);
+  const { active, done } = splitProgressForDisplay(videos, task);
 
   list.innerHTML = active.length
     ? active.map((v, i) => buildProgressCardHtml(v, i, taskStatus)).join("")
@@ -1537,8 +1550,9 @@ function renderVideoProgressFull(videos, taskStatus) {
     }
   }
 
+  const sortKey = `${task?.source || ""}|${task?.search_sort || ""}|${task?.platform || ""}`;
   const expanded = state.doneVideosExpanded ? "1" : "0";
-  state.progressFp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}`;
+  state.progressFp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}|${sortKey}`;
   list.dataset.fp = state.progressFp;
 }
 
@@ -1581,20 +1595,26 @@ function patchProgressCard(card, v, taskStatus) {
   if (tags) tags.innerHTML = channelTagsHtml(v.channels);
 }
 
-function updateVideoProgress(videos, force = false, taskStatus = state.taskDetail?.status) {
+function updateVideoProgress(
+  videos,
+  force = false,
+  taskStatus = state.taskDetail?.status,
+  task = state.taskDetail,
+) {
   const expanded = state.doneVideosExpanded ? "1" : "0";
-  const fp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}`;
+  const sortKey = `${task?.source || ""}|${task?.search_sort || ""}|${task?.platform || ""}`;
+  const fp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}|${sortKey}`;
 
   if (!force && fp === state.progressFp) return;
 
-  renderVideoProgressFull(videos, taskStatus);
+  renderVideoProgressFull(videos, taskStatus, task);
 }
 
 async function sendVideoManual(videoId) {
   if (!state.selectedTaskId || state.sendingVideos.has(videoId)) return;
   state.sendingVideos.add(videoId);
   if (state.taskDetail) {
-    updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status);
+    updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status, state.taskDetail);
   }
   try {
     await api(
@@ -1607,7 +1627,7 @@ async function sendVideoManual(videoId) {
   } finally {
     state.sendingVideos.delete(videoId);
     if (state.taskDetail) {
-      updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status);
+      updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status, state.taskDetail);
     }
   }
 }
@@ -3149,15 +3169,17 @@ function bindEvents() {
   $("#deleteTaskBtn").addEventListener("click", () => deleteTask());
 
   $("#videoProgressPanel")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-send-video]");
+    if (btn?.dataset.sendVideo) sendVideoManual(btn.dataset.sendVideo);
+  });
+
+  $("#videoProgressDoneWrap")?.addEventListener("click", (e) => {
     if (e.target.closest("#toggleDoneVideosBtn")) {
       state.doneVideosExpanded = !state.doneVideosExpanded;
       if (state.taskDetail) {
-        updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status);
+        updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status, state.taskDetail);
       }
-      return;
     }
-    const btn = e.target.closest("[data-send-video]");
-    if (btn?.dataset.sendVideo) sendVideoManual(btn.dataset.sendVideo);
   });
 
   window.addEventListener("popstate", async () => {
