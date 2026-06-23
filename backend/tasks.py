@@ -228,6 +228,11 @@ def _video_is_terminal(vp: dict) -> bool:
     return vp.get("status") in (VIDEO_DONE, VIDEO_SKIPPED)
 
 
+def _video_auto_skip(vp: dict) -> bool:
+    """自动任务轮次中不再重试的状态（含发帖/下载失败）。"""
+    return vp.get("status") in (VIDEO_DONE, VIDEO_SKIPPED, VIDEO_FAILED)
+
+
 def _video_all_channels_done(vp: dict) -> bool:
     chs = vp.get("channels", [])
     return bool(chs) and all(c.get("status") == CH_DONE for c in chs)
@@ -1129,7 +1134,7 @@ async def _run_video_pass(
             return True
 
         vp = task.video_progress[vi]
-        if _video_is_terminal(vp):
+        if _video_auto_skip(vp):
             continue
         if _video_all_channels_done(vp):
             _set_video(task, vi, status=VIDEO_DONE, message=vp.get("message") or "全部成功")
@@ -1164,7 +1169,7 @@ async def _run_video_pass(
             return True
 
         vp = task.video_progress[vi]
-        if not _video_is_terminal(vp) and not _video_all_channels_done(vp):
+        if not _video_auto_skip(vp) and not _video_all_channels_done(vp):
             _log(task, "warn", f"第 {vi + 1} 条未发完，等待下轮继续")
             return False
 
@@ -1395,7 +1400,7 @@ def can_manual_send_video(task: TaskState, vi: int) -> bool:
         return False
     vp = task.video_progress[vi]
     st = vp.get("status")
-    if st in (VIDEO_DOWNLOADING, VIDEO_SKIPPED, VIDEO_DONE):
+    if st in (VIDEO_DOWNLOADING, VIDEO_DONE):
         return False
     if st == VIDEO_POSTING and not _video_all_channels_done(vp):
         return True
@@ -1418,8 +1423,12 @@ def _prepare_video_manual_send(task: TaskState, vi: int):
     vp = task.video_progress[vi]
     st = vp.get("status")
     if st in (VIDEO_SKIPPED, VIDEO_FAILED):
+        vp["status"] = VIDEO_PENDING
         vp["account"] = ""
-        vp["message"] = ""
+        vp["message"] = "手动重试"
+        vp["started_at"] = ""
+        vp["sent_at"] = ""
+        vp.pop("wait_until", None)
         for ch in vp.get("channels", []):
             ch["status"] = CH_PENDING
             ch["sent_at"] = ""
@@ -1488,9 +1497,12 @@ async def send_task_video(task_id: str, video_id: str) -> dict:
         _prepare_video_manual_send(task, vi)
         video = task.payload["videos"][vi]
         _log(task, "info", f"手动发送: {video.get('title', '')[:50]}")
-        posted, failed, stop_all = await _process_one_video(task_id, task, vi, skip_lock=True)
+        posted, failed, stop_all = await _process_one_video(task_id, task, vi, skip_lock=True, manual_retry=True)
         if stop_all and not _aborted(task_id):
             _log(task, "error", "全局限流，手动发送终止")
+        vp_after = task.video_progress[vi]
+        if not posted and vp_after.get("status") in (VIDEO_FAILED, VIDEO_SKIPPED):
+            raise ValueError(vp_after.get("message") or "发送失败，请查看日志")
         _recompute_task_completion(task)
         return {
             "ok": True,
@@ -1501,7 +1513,7 @@ async def send_task_video(task_id: str, video_id: str) -> dict:
 
 
 async def _process_one_video(
-    task_id: str, task: TaskState, vi: int, *, skip_lock: bool = False
+    task_id: str, task: TaskState, vi: int, *, skip_lock: bool = False, manual_retry: bool = False
 ) -> tuple[list[str], list[str], bool]:
     """下载并发送单条视频，返回 (posted, failed, stop_all)"""
     payload = task.payload
@@ -1515,6 +1527,8 @@ async def _process_one_video(
 
     async def _run() -> tuple[list[str], list[str], bool]:
         vp = task.video_progress[vi]
+        if not manual_retry and _video_auto_skip(vp):
+            return [], [], False
         if _video_is_terminal(vp):
             return [], [], False
         if _video_all_channels_done(vp):
@@ -1569,8 +1583,8 @@ async def _process_one_video(
                     _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}")
                     _persist_tasks()
                     return [], [], True
-                _set_video(task, vi, status=VIDEO_FAILED, message=err_msg[:80])
-                _log(task, "warn", f"下载失败 — {title[:30]}")
+                _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {err_msg[:60]}")
+                _log(task, "warn", f"下载失败，已跳过 — {title[:30]}")
                 return [], [], False
 
         if _aborted(task_id):
@@ -1589,8 +1603,8 @@ async def _process_one_video(
                 _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}: {err_msg[:60]}")
                 _persist_tasks()
                 return [], [], True
-            _set_video(task, vi, status=VIDEO_FAILED, message=err_msg[:80])
-            _log(task, "warn", f"下载失败（可重试）: {err_msg} — {title[:30]}")
+            _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {err_msg[:60]}")
+            _log(task, "warn", f"下载失败，已跳过 — {title[:30]}")
             return [], [], False
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024)

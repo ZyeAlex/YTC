@@ -20,14 +20,51 @@ function taskKindLabel(t) {
   return `抖音 · 关键词 · ${run}`;
 }
 
-/** 侧栏用短标签 */
-function taskKindShortLabel(t) {
-  if (!t) return "-";
-  const run = t.task_type === "recurring" ? "长期" : "单次";
-  if (t.platform === "bili") return `B站·关键词·${run}`;
-  if (t.task_type === "custom" || t.source === "manual") return `抖音·链接·${run}`;
-  if (t.source === "collection") return `抖音·收藏·${run}`;
-  return `抖音·关键词·${run}`;
+/** 侧栏任务卡片：从字段构建层级展示，避免与自动生成的 t.name 重复 */
+function buildSidebarTaskDisplay(t) {
+  const recurring = t.task_type === "recurring";
+  const isBili = t.platform === "bili";
+  const isManual = t.task_type === "custom" || t.source === "manual";
+  const isCollection = t.source === "collection";
+
+  let title = "";
+  if (isManual) {
+    title = "手动链接";
+  } else if (isCollection) {
+    title = (t.collection_account_label || "").trim() || "抖音收藏";
+  } else {
+    title = (t.keyword || "").trim() || "未命名";
+  }
+
+  const platform = isBili
+    ? { label: "B站", chip: "chip-plat-bili", item: "item-bili" }
+    : { label: "抖音", chip: "chip-plat-douyin", item: "item-douyin" };
+
+  let source;
+  if (isManual) {
+    source = { label: "链接", chip: "chip-src-manual" };
+  } else if (isCollection) {
+    source = { label: "收藏", chip: "chip-src-collection" };
+  } else {
+    source = { label: "关键词", chip: "chip-src-keyword" };
+  }
+
+  const schedule = recurring
+    ? { label: "长期", chip: "chip-sched-recurring" }
+    : { label: "单次", chip: "chip-sched-once" };
+
+  return { title, platform, source, schedule, recurring, isBili };
+}
+
+function renderSidebarTaskChips(meta) {
+  return `
+    <div class="sidebar-chip-row" aria-label="任务类型">
+      <span class="sidebar-chip ${meta.platform.chip}">${escapeHtml(meta.platform.label)}</span>
+      <span class="sidebar-chip-sep" aria-hidden="true"></span>
+      <span class="sidebar-chip ${meta.source.chip}">${escapeHtml(meta.source.label)}</span>
+      <span class="sidebar-chip-sep" aria-hidden="true"></span>
+      <span class="sidebar-chip ${meta.schedule.chip}">${escapeHtml(meta.schedule.label)}</span>
+    </div>`;
 }
 
 function taskKindTagClass(t) {
@@ -38,6 +75,7 @@ function taskKindTagClass(t) {
   if (t.platform === "bili") return "bili";
   return "search";
 }
+
 const SEARCH_SORT_LABEL = { default: "综合", recent: "最新" };
 
 const TASK_STATUS = {
@@ -1261,18 +1299,24 @@ function renderSidebar() {
     .map((t) => {
       const sel =
         state.mainView === "task" && t.task_id === state.selectedTaskId ? " active" : "";
-      const label = TASK_STATUS[t.status] || t.status;
-      const progress = t.videos_done != null ? `${t.videos_done}/${t.video_count}` : `${t.video_count} 视频`;
-      const typeTag = `<span class="task-type-tag ${taskKindTagClass(t)}">${escapeHtml(taskKindShortLabel(t))}</span>`;
+      const statusLabel = TASK_STATUS[t.status] || t.status;
+      const progress =
+        t.videos_done != null ? `${t.videos_done}/${t.video_count}` : `${t.video_count} 视频`;
+      const meta = buildSidebarTaskDisplay(t);
+      const running = t.status === "running" ? " is-running" : "";
+      const recurring = meta.recurring ? " is-recurring" : "";
       return `
-        <div class="sidebar-item${sel}" data-id="${t.task_id}">
-          <div class="sidebar-item-top">
-            <div class="sidebar-item-name">${escapeHtml(t.name)}</div>
-            <span class="task-badge status-${t.status}">${label}</span>
-          </div>
-          <div class="sidebar-item-meta">
-            ${typeTag}
-            <span class="sidebar-item-progress">${progress}</span>
+        <div class="sidebar-item ${meta.platform.item}${sel}${running}${recurring}" data-id="${t.task_id}">
+          <div class="sidebar-item-accent" aria-hidden="true"></div>
+          <div class="sidebar-item-inner">
+            <div class="sidebar-item-head">
+              ${renderSidebarTaskChips(meta)}
+              <span class="task-badge status-${t.status}">${statusLabel}</span>
+            </div>
+            <div class="sidebar-item-title" title="${escapeAttr(t.name)}">${escapeHtml(meta.title)}</div>
+            <div class="sidebar-item-foot">
+              <span class="sidebar-item-progress">${progress}</span>
+            </div>
           </div>
         </div>`;
     })
@@ -1480,12 +1524,18 @@ function canManualSend(v, taskStatus) {
     const chs = v.channels || [];
     return chs.length > 0 && !chs.every((c) => c.status === "done");
   }
-  if (["downloading", "skipped", "done"].includes(v.status)) return false;
+  if (["downloading", "done"].includes(v.status)) return false;
   return true;
 }
 
 function sendBtnLabel(v) {
-  return v.status === "failed" ? "重试" : "发送";
+  return v.status === "failed" || v.status === "skipped" ? "重试" : "发送";
+}
+
+function progressMessageHtml(v) {
+  if (v.message) return escapeHtml(v.message);
+  if (v.status === "failed") return "发送失败，可点击重试";
+  return "";
 }
 
 function buildProgressCardHtml(v, i, taskStatus) {
@@ -1506,7 +1556,7 @@ function buildProgressCardHtml(v, i, taskStatus) {
         </div>
         ${videoTimeHtml(v)}
         <div class="progress-account">${v.account ? `账号: ${escapeHtml(v.account)}` : ""}</div>
-        <div class="progress-msg">${v.message ? escapeHtml(v.message) : ""}</div>
+        <div class="progress-msg">${progressMessageHtml(v)}</div>
         <div class="channel-tags">${channelTagsHtml(v.channels)}</div>
       </div>
     </div>`;

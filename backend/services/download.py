@@ -101,7 +101,7 @@ def _douyin_cookie_candidates() -> list[str]:
 
 
 def should_skip_download(err: str) -> bool:
-    """永久跳过：超大文件、图文帖、已删除/私密、B站412等，重试无意义。"""
+    """永久跳过：超大文件、图文帖、已删除/私密、B站412、解析器错误等，重试无意义。"""
     text = err or ""
     if "超过" in text and "MB 限制" in text:
         return True
@@ -109,7 +109,13 @@ def should_skip_download(err: str) -> bool:
         return True
     if "HTTP 412" in text or "B站拒绝下载" in text:
         return True
-    for kw in ("作品不见了", "已被删除", "作品权限", "不可观看", "设为私密", "status_self_see", "status_delete"):
+    for kw in (
+        "作品不见了", "已被删除", "作品权限", "不可观看", "设为私密",
+        "status_self_see", "status_delete",
+        "extractor error", "KeyError('bvid')", "KeyError(\"bvid\")",
+        "Video unavailable", "Private video", "此视频不存在", "视频不存在",
+        "稿件不可见", "版权限制", "地区限制",
+    ):
         if kw in text:
             return True
     return False
