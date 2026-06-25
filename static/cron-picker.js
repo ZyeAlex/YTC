@@ -93,6 +93,7 @@
       this.container = typeof container === "string" ? document.querySelector(container) : container;
       this.onChange = options.onChange || (() => {});
       this.allowEmpty = !!options.allowEmpty;
+      this.modes = options.modes || ["step", "specific"];
       this.panelEl = null;
       this.footEl = null;
       this.exprInput = null;
@@ -104,7 +105,7 @@
         this.isEmpty = true;
         this.minuteState = emptyMinuteState();
       } else {
-        this.minuteState = parseCron(initial);
+        this.minuteState = this._normalizeMode(parseCron(initial));
       }
 
       this._render();
@@ -127,7 +128,7 @@
         return;
       }
       this.isEmpty = false;
-      this.minuteState = parseCron(expr);
+      this.minuteState = this._normalizeMode(parseCron(expr));
       this._syncFromState(false);
       this._renderPanel();
     }
@@ -167,40 +168,62 @@
       this._renderPanel();
     }
 
+    _normalizeMode(state) {
+      if (this.modes.includes(state.mode)) return state;
+      if (state.mode === "range") {
+        const start = state.start ?? 0;
+        const end = state.end ?? 59;
+        const step = Math.max(1, end - start || 20);
+        return { mode: "step", start, step };
+      }
+      if (state.mode === "specific" && state.values?.length) {
+        return { mode: "specific", values: [...state.values] };
+      }
+      return { mode: "step", start: 0, step: 20 };
+    }
+
     _renderPanel() {
       const state = this.minuteState;
       this.panelEl.innerHTML = "";
 
-      this._addOption(state, "every", "每分", null);
-      this._addOption(state, "range", null, (wrap) => {
-        wrap.innerHTML =
-          '从 <input type="number" class="cron-picker-num" data-k="start" min="0" max="59" /> 到 <input type="number" class="cron-picker-num" data-k="end" min="0" max="59" /> 分';
-      });
-      this._addOption(state, "step", null, (wrap) => {
-        wrap.innerHTML =
-          '从 <input type="number" class="cron-picker-num" data-k="start" min="0" max="59" /> 分开始，每 <input type="number" class="cron-picker-num" data-k="step" min="1" max="59" /> 分';
-      });
-      this._addOption(state, "specific", "指定分钟", (wrap) => {
-        const grid = document.createElement("div");
-        grid.className = "cron-picker-grid";
-        for (let i = 0; i <= 59; i++) {
-          const chip = document.createElement("button");
-          chip.type = "button";
-          chip.className = "cron-picker-chip";
-          chip.textContent = String(i).padStart(2, "0");
-          chip.dataset.v = String(i);
-          chip.addEventListener("click", () => {
-            this.isEmpty = false;
-            state.mode = "specific";
-            if (!state.values?.length) state.values = [];
-            this._toggleSpecific(state, i);
-            this._syncFromState();
-            this._renderPanel();
-          });
-          grid.appendChild(chip);
-        }
-        wrap.appendChild(grid);
-      });
+      if (this.modes.includes("every")) {
+        this._addOption(state, "every", "每分", null);
+      }
+      if (this.modes.includes("range")) {
+        this._addOption(state, "range", null, (wrap) => {
+          wrap.innerHTML =
+            '从 <input type="number" class="cron-picker-num" data-k="start" min="0" max="59" /> 到 <input type="number" class="cron-picker-num" data-k="end" min="0" max="59" /> 分';
+        });
+      }
+      if (this.modes.includes("step")) {
+        this._addOption(state, "step", null, (wrap) => {
+          wrap.innerHTML =
+            '从 <input type="number" class="cron-picker-num" data-k="start" min="0" max="59" /> 分开始，每 <input type="number" class="cron-picker-num" data-k="step" min="1" max="59" /> 分';
+        });
+      }
+      if (this.modes.includes("specific")) {
+        this._addOption(state, "specific", "指定分钟", (wrap) => {
+          const grid = document.createElement("div");
+          grid.className = "cron-picker-grid";
+          for (let i = 0; i <= 59; i++) {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "cron-picker-chip";
+            chip.textContent = String(i).padStart(2, "0");
+            chip.dataset.v = String(i);
+            chip.addEventListener("click", () => {
+              this.isEmpty = false;
+              state.mode = "specific";
+              if (!state.values?.length) state.values = [];
+              this._toggleSpecific(state, i);
+              this._syncFromState();
+              this._renderPanel();
+            });
+            grid.appendChild(chip);
+          }
+          wrap.appendChild(grid);
+        });
+      }
     }
 
     _addOption(state, mode, labelText, bodyFn) {
@@ -320,7 +343,7 @@
         return;
       }
       this.isEmpty = false;
-      this.minuteState = parseCron(expr);
+      this.minuteState = this._normalizeMode(parseCron(expr));
       this._renderPanel();
       this.exprInput.value = serializeCron(this.minuteState);
       this.onChange(this.exprInput.value);

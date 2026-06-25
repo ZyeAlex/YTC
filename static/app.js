@@ -391,6 +391,7 @@ function bindCronInput() {
   cronPicker = new CronPicker(mount, {
     value: dialog.cron || "",
     allowEmpty: true,
+    modes: ["step", "specific"],
     onChange: (v) => {
       dialog.cron = v;
     },
