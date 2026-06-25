@@ -48,6 +48,7 @@ from backend.models import (
     TaskUpdateRequest,
     DouyinLinksRequest,
     DouyinCollectionRequest,
+    DouyinCollectsListRequest,
     UserAccountsUpdate,
     UserChannelsUpdate,
 )
@@ -360,7 +361,9 @@ async def api_create_task(req: TaskCreateRequest, _auth: None = Depends(require_
         "batch_count": 1 if req.task_type == "recurring" else 0,
         "source": req.source,
         "douyin_cookie_index": req.douyin_cookie_index,
+        "douyin_collects_id": req.douyin_collects_id.strip(),
         "collection_account_label": req.collection_account_label.strip(),
+        "include_topics": req.include_topics,
     }
     try:
         task_id = create_task(
@@ -414,7 +417,9 @@ def api_update_task(task_id: str, req: TaskUpdateRequest, _auth: None = Depends(
         "search_sort": req.search_sort,
         "source": req.source,
         "douyin_cookie_index": req.douyin_cookie_index,
+        "douyin_collects_id": req.douyin_collects_id.strip(),
         "collection_account_label": req.collection_account_label.strip(),
+        "include_topics": req.include_topics,
     }
     try:
         update_task(task_id, payload, keyword=req.keyword.strip())
@@ -449,6 +454,13 @@ def api_douyin_cookie_accounts(_auth: None = Depends(require_auth)):
     return {"accounts": get_douyin_cookie_accounts()}
 
 
+@app.post("/api/douyin/collects-list")
+def api_douyin_collects_list(req: DouyinCollectsListRequest, _auth: None = Depends(require_auth)):
+    from backend.services.douyin_collection import fetch_douyin_collects_list
+
+    return fetch_douyin_collects_list(cookie_index=req.cookie_index)
+
+
 @app.post("/api/douyin/collection")
 def api_douyin_collection(req: DouyinCollectionRequest, _auth: None = Depends(require_auth)):
     if req.fetch_all:
@@ -456,6 +468,7 @@ def api_douyin_collection(req: DouyinCollectionRequest, _auth: None = Depends(re
 
         result = fetch_douyin_collection_all(
             cookie_index=req.cookie_index,
+            collects_id=req.collects_id.strip(),
             max_items=req.max_items,
             page_size=req.count,
             page_delay=1.2,
@@ -467,6 +480,7 @@ def api_douyin_collection(req: DouyinCollectionRequest, _auth: None = Depends(re
             cookie_index=req.cookie_index,
             cursor=req.cursor,
             count=req.count,
+            collects_id=req.collects_id.strip(),
         )
     if result.get("error") and not result.get("videos"):
         raise HTTPException(400, result["error"])
@@ -535,19 +549,22 @@ def api_task_status(task_id: str, _auth: None = Depends(require_auth)):
     return detail
 
 
+_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 @app.get("/settings")
 def settings_page():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 @app.get("/auto-like")
 def auto_like_page():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 
 if STATIC_DIR.exists():

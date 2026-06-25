@@ -41,12 +41,24 @@ _LIST_HOSTS = (
     "https://www.douyin.com/aweme/v1/web/aweme/listcollection/",
     "https://www-hj.douyin.com/aweme/v1/web/aweme/listcollection/",
 )
+_COLLECTS_LIST_HOSTS = (
+    "https://www.douyin.com/aweme/v1/web/collects/list/",
+    "https://www-hj.douyin.com/aweme/v1/web/collects/list/",
+)
+_COLLECTS_VIDEO_HOSTS = (
+    "https://www.douyin.com/aweme/v1/web/collects/video/list/",
+    "https://www-hj.douyin.com/aweme/v1/web/collects/video/list/",
+)
 _PROFILE_HOSTS = (
     "https://www.douyin.com/aweme/v1/web/user/profile/self/",
     "https://www-hj.douyin.com/aweme/v1/web/user/profile/self/",
 )
 
 _FAVORITE_REFERER = "https://www.douyin.com/user/self?showTab=favorite_collection&showSubTab=video"
+_FAVORITE_FOLDER_REFERER = (
+    "https://www.douyin.com/user/self?from_tab_name=main"
+    "&showSubTab=favorite_folder&showTab=favorite_collection"
+)
 _SESSION_TTL = 600.0
 _session_cache: dict[int, tuple[float, Any, dict[str, str]]] = {}
 
@@ -174,9 +186,18 @@ def _generate_abogus(query: str, body: str = "", *, sign_with_body: bool = True)
     return token
 
 
-def _api_headers(cookie: str | dict[str, str], referer: str, *, post: bool = False) -> dict[str, str]:
+def _api_headers(
+    cookie: str | dict[str, str],
+    referer: str,
+    *,
+    post: bool = False,
+    request_url: str = "",
+) -> dict[str, str]:
     if isinstance(cookie, dict):
         cookie = _serialize_cookie(cookie)
+    fetch_site = "same-origin"
+    if request_url and "douyin.com" in request_url and not request_url.startswith("https://www.douyin.com"):
+        fetch_site = "same-site"
     headers = {
         "accept": "application/json, text/plain, */*",
         "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -188,8 +209,10 @@ def _api_headers(cookie: str | dict[str, str], referer: str, *, post: bool = Fal
         "sec-ch-ua-platform": '"macOS"',
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
+        "sec-fetch-site": fetch_site,
     }
+    if fetch_site == "same-site":
+        headers["origin"] = "https://www.douyin.com"
     uifid = _cookie_field(cookie, "UIFID")
     if uifid:
         headers["uifid"] = uifid
@@ -283,7 +306,7 @@ def _http_request(
     http_session=None,
 ) -> dict[str, Any]:
     cookie_str = _serialize_cookie(cookies)
-    headers = _api_headers(cookie_str, referer, post=method.upper() == "POST")
+    headers = _api_headers(cookie_str, referer, post=method.upper() == "POST", request_url=url)
 
     if http_session is not None:
         try:
@@ -387,6 +410,75 @@ def _listcollection_request(
     return data, last_err
 
 
+def _signed_get_request(
+    cookie_index: int,
+    hosts: tuple[str, ...],
+    extra_query: dict[str, str],
+    *,
+    referer: str,
+    force_refresh: bool = False,
+) -> tuple[dict[str, Any], str]:
+    try:
+        http_session, cookies = _get_cached_session(cookie_index, force_refresh=force_refresh)
+    except ValueError as e:
+        return {}, str(e)
+
+    query = _build_query(cookies, extra_query)
+    last_err = ""
+    data: dict[str, Any] = {}
+
+    for host in hosts:
+        abogus = _generate_abogus(query)
+        url = f"{host}?{query}"
+        if abogus:
+            url = f"{url}&a_bogus={urllib.parse.quote(abogus, safe='')}"
+
+        for attempt in range(3):
+            data = _http_request(
+                "GET",
+                url,
+                cookies,
+                referer=referer,
+                http_session=http_session,
+            )
+            last_err = _api_error(data)
+            if not last_err:
+                return data, ""
+            retryable = any(
+                x in last_err
+                for x in ("不是 JSON", "空响应", "网页而非 JSON", "签名", "限流")
+            )
+            if retryable and attempt < 2:
+                time.sleep(1.0 * (attempt + 1) + random.uniform(0.1, 0.4))
+                continue
+            break
+        if not last_err:
+            break
+
+    return data, last_err
+
+
+def _collects_video_list_request(
+    cookie_index: int,
+    collects_id: str,
+    cursor: int,
+    count: int,
+    *,
+    force_refresh: bool = False,
+) -> tuple[dict[str, Any], str]:
+    return _signed_get_request(
+        cookie_index,
+        _COLLECTS_VIDEO_HOSTS,
+        {
+            "collects_id": collects_id,
+            "cursor": str(cursor),
+            "count": str(count),
+        },
+        referer=_FAVORITE_FOLDER_REFERER,
+        force_refresh=force_refresh,
+    )
+
+
 def _aweme_to_video(aweme: dict[str, Any]) -> dict[str, Any] | None:
     aweme_id = str(aweme.get("aweme_id") or "")
     if not aweme_id:
@@ -476,12 +568,101 @@ def get_douyin_cookie_accounts() -> list[dict[str, Any]]:
     return accounts
 
 
+def fetch_douyin_collects_list(
+    cookie_index: int = 0,
+    *,
+    cursor: int = 0,
+    count: int = 50,
+) -> dict[str, Any]:
+    """拉取指定账号的收藏夹目录（不含默认视频列表）。"""
+    cookies = [c.strip() for c in get_douyin_cookies() if (c or "").strip()]
+    if not cookies:
+        return {"folders": [], "error": "未配置抖音 Cookie，请先在设置页添加"}
+    if cookie_index < 0 or cookie_index >= len(cookies):
+        return {"folders": [], "error": f"无效的抖音账号索引: {cookie_index}"}
+
+    count = max(1, min(int(count), 50))
+    cursor = max(0, int(cursor))
+    all_folders: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    has_more = False
+    error = ""
+
+    while True:
+        data, last_err = _signed_get_request(
+            cookie_index,
+            _COLLECTS_LIST_HOSTS,
+            {"cursor": str(cursor), "count": str(count)},
+            referer=_FAVORITE_FOLDER_REFERER,
+        )
+        if last_err:
+            _invalidate_session(cookie_index)
+            data, last_err = _signed_get_request(
+                cookie_index,
+                _COLLECTS_LIST_HOSTS,
+                {"cursor": str(cursor), "count": str(count)},
+                referer=_FAVORITE_FOLDER_REFERER,
+                force_refresh=True,
+            )
+        if last_err:
+            hint = "请确认 Cookie 已登录且未过期；若仍失败请重新从浏览器复制完整 Cookie"
+            if not all_folders:
+                return {
+                    "folders": [],
+                    "error": f"{last_err}（{hint}）",
+                    "cursor": cursor,
+                    "has_more": False,
+                    "cookie_index": cookie_index,
+                }
+            error = last_err
+            break
+
+        items = data.get("collects_list") or data.get("folder_list") or []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            folder_id = str(
+                item.get("collects_id")
+                or item.get("folder_id")
+                or item.get("id")
+                or ""
+            ).strip()
+            if not folder_id or folder_id in seen:
+                continue
+            seen.add(folder_id)
+            name = str(
+                item.get("collects_name")
+                or item.get("folder_name")
+                or item.get("name")
+                or folder_id
+            ).strip()
+            all_folders.append({"id": folder_id, "name": name})
+
+        has_more = bool(data.get("has_more"))
+        if not has_more:
+            break
+        cursor = int(data.get("cursor", cursor))
+        if cursor <= 0:
+            break
+
+    return {
+        "folders": all_folders,
+        "cursor": cursor,
+        "has_more": has_more,
+        "count": len(all_folders),
+        "cookie_index": cookie_index,
+        "error": error,
+    }
+
+
 def fetch_douyin_collection(
     cookie_index: int = 0,
     cursor: int = 0,
     count: int = 20,
+    *,
+    collects_id: str = "",
 ) -> dict[str, Any]:
-    """拉取指定 cookie 账号的收藏视频列表。"""
+    """拉取指定 cookie 账号的收藏视频列表；collects_id 为空时使用默认视频列表。"""
     cookies = [c.strip() for c in get_douyin_cookies() if (c or "").strip()]
     if not cookies:
         return {"videos": [], "error": "未配置抖音 Cookie，请先在设置页添加"}
@@ -490,14 +671,29 @@ def fetch_douyin_collection(
 
     count = max(1, min(int(count), 20))
     cursor = max(0, int(cursor))
+    folder_id = (collects_id or "").strip()
 
-    data, last_err = _listcollection_request(cookie_index, cursor, count)
-    if last_err:
-        _invalidate_session(cookie_index)
-        data, last_err = _listcollection_request(cookie_index, cursor, count, force_refresh=True)
+    if folder_id:
+        data, last_err = _collects_video_list_request(cookie_index, folder_id, cursor, count)
+        if last_err:
+            _invalidate_session(cookie_index)
+            data, last_err = _collects_video_list_request(
+                cookie_index, folder_id, cursor, count, force_refresh=True
+            )
+    else:
+        data, last_err = _listcollection_request(cookie_index, cursor, count)
+        if last_err:
+            _invalidate_session(cookie_index)
+            data, last_err = _listcollection_request(cookie_index, cursor, count, force_refresh=True)
     if last_err:
         hint = "请确认 Cookie 已登录且未过期；若仍失败请重新从浏览器复制完整 Cookie"
-        return {"videos": [], "error": f"{last_err}（{hint}）", "cursor": cursor, "has_more": False}
+        return {
+            "videos": [],
+            "error": f"{last_err}（{hint}）",
+            "cursor": cursor,
+            "has_more": False,
+            "collects_id": folder_id,
+        }
 
     awemes = data.get("aweme_list") or []
     videos: list[dict[str, Any]] = []
@@ -518,12 +714,14 @@ def fetch_douyin_collection(
         "has_more": has_more,
         "count": len(videos),
         "cookie_index": cookie_index,
+        "collects_id": folder_id,
     }
 
 
 def fetch_douyin_collection_all(
     cookie_index: int = 0,
     *,
+    collects_id: str = "",
     max_items: int = 2000,
     page_size: int = 20,
     page_delay: float = 1.0,
@@ -531,6 +729,7 @@ def fetch_douyin_collection_all(
     """翻页拉取全部收藏，直至 has_more 为 false 或达到 max_items。"""
     max_items = max(1, min(int(max_items), 5000))
     page_size = max(1, min(int(page_size), 20))
+    folder_id = (collects_id or "").strip()
     all_videos: list[dict[str, Any]] = []
     seen: set[str] = set()
     cursor = 0
@@ -540,13 +739,13 @@ def fetch_douyin_collection_all(
 
     while len(all_videos) < max_items:
         count = min(page_size, max_items - len(all_videos))
-        page = fetch_douyin_collection(cookie_index, cursor, count)
+        page = fetch_douyin_collection(cookie_index, cursor, count, collects_id=folder_id)
         pages += 1
         if page.get("error"):
             error = str(page["error"])
             if not all_videos and pages == 1:
                 time.sleep(1.5)
-                page = fetch_douyin_collection(cookie_index, cursor, count)
+                page = fetch_douyin_collection(cookie_index, cursor, count, collects_id=folder_id)
                 pages += 1
                 if not page.get("error"):
                     error = ""
@@ -563,6 +762,7 @@ def fetch_douyin_collection_all(
                         "truncated": False,
                         "pages_fetched": pages,
                         "cookie_index": cookie_index,
+                        "collects_id": folder_id,
                     }
                 break
 
@@ -592,6 +792,7 @@ def fetch_douyin_collection_all(
         "truncated": truncated,
         "pages_fetched": pages,
         "cookie_index": cookie_index,
+        "collects_id": folder_id,
         "error": error,
     }
 
@@ -604,6 +805,7 @@ def fetch_douyin_collection_diff(
     cookie_index: int,
     existing_ids: set[str],
     *,
+    collects_id: str = "",
     existing_newest_ids: list[str] | None = None,
     max_new: int = 500,
     page_size: int = 20,
@@ -625,14 +827,20 @@ def fetch_douyin_collection_diff(
     error = ""
     stopped_on_duplicate = False
 
+    folder_id = (collects_id or "").strip()
+
     while len(new_videos) < max_new:
-        page = fetch_douyin_collection(cookie_index, cursor, page_size)
+        page = fetch_douyin_collection(
+            cookie_index, cursor, page_size, collects_id=folder_id
+        )
         pages += 1
         if page.get("error"):
             error = str(page["error"])
             if not new_videos and pages == 1:
                 time.sleep(1.5)
-                page = fetch_douyin_collection(cookie_index, cursor, page_size)
+                page = fetch_douyin_collection(
+                    cookie_index, cursor, page_size, collects_id=folder_id
+                )
                 pages += 1
                 if not page.get("error"):
                     error = ""
@@ -695,6 +903,7 @@ def fetch_douyin_collection_new(
     cookie_index: int,
     existing_ids: set[str],
     *,
+    collects_id: str = "",
     existing_newest_ids: list[str] | None = None,
     max_new: int = 500,
     page_size: int = 20,
@@ -704,6 +913,7 @@ def fetch_douyin_collection_new(
     return fetch_douyin_collection_diff(
         cookie_index,
         existing_ids,
+        collects_id=collects_id,
         existing_newest_ids=existing_newest_ids,
         max_new=max_new,
         page_size=page_size,

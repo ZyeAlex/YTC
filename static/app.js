@@ -106,6 +106,7 @@ const state = {
   renderedInfoTaskId: null,
   progressFp: "",
   doneVideosExpanded: false,
+  failedVideosExpanded: false,
   sendingVideos: new Set(),
   mainView: "task",
 };
@@ -115,9 +116,12 @@ const dialog = {
   tab: "bili",
   douyinSubTab: "keyword",
   douyinCookieIndex: 0,
+  douyinCollectsId: "",
+  douyinFolders: [],
   douyinAccounts: [],
   collectionCursor: 0,
   collectionHasMore: false,
+  savedCollectionLabel: "",
   editTaskId: null,
   lockedVideoIds: new Set(),
   platform: "bili",
@@ -128,6 +132,7 @@ const dialog = {
   selectedAccounts: new Set(),
   cron: "",
   searchSort: "recent",
+  includeTopics: true,
 };
 
 let cronPicker = null;
@@ -1245,7 +1250,11 @@ function progressFingerprint(videos) {
       message: v.message,
       started_at: v.started_at,
       sent_at: v.sent_at,
-      channels: (v.channels || []).map((c) => ({ status: c.status, sent_at: c.sent_at })),
+      channels: (v.channels || []).map((c) => ({
+        status: c.status,
+        sent_at: c.sent_at,
+        error: c.error,
+      })),
     }))
   );
 }
@@ -1266,7 +1275,7 @@ function channelTagsHtml(channels) {
       const cls = `ch-tag status-${c.status}`;
       const icon = c.status === "done" ? "✓" : c.status === "failed" ? "✗" : c.status === "posting" ? "…" : "○";
       const time = c.sent_at ? ` ${formatSentTime(c.sent_at)}` : "";
-      const title = c.sent_at ? `${c.name} · ${c.sent_at}` : c.name;
+      const title = c.error ? `${c.name} · ${c.error}` : (c.sent_at ? `${c.name} · ${c.sent_at}` : c.name);
       return `<span class="${cls}" title="${escapeHtml(title)}">${icon} ${escapeHtml(c.name)}${time ? `<span class="ch-time">${escapeHtml(time.trim())}</span>` : ""}</span>`;
     })
     .join("");
@@ -1369,6 +1378,7 @@ async function selectTask(taskId, { updateUrl = true, replaceUrl = false } = {})
   state.renderedInfoTaskId = null;
   state.progressFp = "";
   state.doneVideosExpanded = false;
+  state.failedVideosExpanded = false;
   saveSelectedTask();
   if (updateUrl) setTaskUrl(taskId, { replace: replaceUrl });
   renderSidebar();
@@ -1459,6 +1469,7 @@ function renderTaskDetail(force = false) {
       ${isRecurring ? `<div class="info-card"><label>${batchLabel}</label><span>${t.batch_count || 0}</span></div>` : ""}
       <div class="info-card"><label>频道数</label><span>${t.channel_count}</span></div>
       <div class="info-card"><label>发送计划</label><span>${escapeHtml(t.schedule_desc || t.schedule_cron || "-")}</span></div>
+      <div class="info-card"><label>话题标签</label><span>${t.include_topics === false ? "已过滤" : "保留"}</span></div>
       <div class="info-card"><label>Cron</label><span><code>${escapeHtml(t.schedule_cron || "-")}</code></span></div>
       <div class="info-card"><label>创建时间</label><span>${t.created_at || "-"}</span></div>
       <div class="info-card wide"><label>目标频道</label><span>${escapeHtml(chNames)}</span></div>
@@ -1489,6 +1500,24 @@ function isProgressVideoDone(vp) {
   return vp.status === "done" || vp.status === "skipped";
 }
 
+function isProgressVideoFailed(vp) {
+  if (vp.status === "failed") return true;
+  const chs = vp.channels || [];
+  if (!chs.length) return false;
+  const doneN = chs.filter((c) => c.status === "done").length;
+  const failedN = chs.filter((c) => c.status === "failed").length;
+  if (doneN > 0) return false;
+  if (failedN === 0) return false;
+  if (vp.message?.includes("10000")) return true;
+  if (chs.some((c) => (c.error || "").includes("10000"))) return true;
+  return failedN === chs.length;
+}
+
+function isProgressVideoActive(vp) {
+  if (isProgressVideoDone(vp) || isProgressVideoFailed(vp)) return false;
+  return true;
+}
+
 /** 与后端 sends_newest_last 一致：收藏 / 搜索「最新」从列表尾部往前发 */
 function shouldSendNewestLast(task) {
   if (!task) return false;
@@ -1511,11 +1540,13 @@ function splitProgressForDisplay(videos, task) {
   const ordered = orderProgressForDisplay(videos, task);
   const active = [];
   const done = [];
+  const failed = [];
   for (const v of ordered) {
-    if (isProgressVideoDone(v)) done.push(v);
+    if (isProgressVideoFailed(v)) failed.push(v);
+    else if (isProgressVideoDone(v)) done.push(v);
     else active.push(v);
   }
-  return { active, done };
+  return { active, done, failed };
 }
 
 function canManualSend(v, taskStatus) {
@@ -1534,28 +1565,41 @@ function sendBtnLabel(v) {
 
 function progressMessageHtml(v) {
   if (v.message) return escapeHtml(v.message);
+  const chs = v.channels || [];
+  const failedCh = chs.filter((c) => c.status === "failed");
+  if (failedCh.length && isProgressVideoFailed(v)) {
+    const err = failedCh.find((c) => c.error)?.error;
+    if (err) return escapeHtml(err);
+    return escapeHtml(`全部频道失败 (${failedCh.length}/${chs.length})`);
+  }
+  if (failedCh.length) {
+    return escapeHtml(`部分频道失败 (${failedCh.length}/${chs.length})，可点击重试`);
+  }
   if (v.status === "failed") return "发送失败，可点击重试";
   return "";
 }
 
-function buildProgressCardHtml(v, i, taskStatus) {
-  const statusLabel = VIDEO_STATUS[v.status] || v.status;
-  const showSend = canManualSend(v, taskStatus);
+function buildProgressCardHtml(v, i, taskStatus, { compact = false } = {}) {
+  const statusLabel = isProgressVideoFailed(v)
+    ? "发送失败"
+    : (VIDEO_STATUS[v.status] || v.status);
+  const cardStatus = isProgressVideoFailed(v) ? "failed" : v.status;
+  const showSend = !isProgressVideoFailed(v) && canManualSend(v, taskStatus);
   const sending = state.sendingVideos.has(v.id);
   const sendBtn = showSend
     ? `<button type="button" class="btn-send-video" data-send-video="${escapeAttr(v.id)}"${sending ? " disabled" : ""}>${sending ? "…" : sendBtnLabel(v)}</button>`
     : "";
   return `
-    <div class="progress-card status-${v.status}" data-video-id="${escapeAttr(v.id)}">
+    <div class="progress-card status-${cardStatus}${compact ? " progress-card-compact" : ""}" data-video-id="${escapeAttr(v.id)}">
       <div class="progress-body">
         <div class="progress-head">
-          <span class="progress-num">${i + 1}</span>
+          ${compact ? "" : `<span class="progress-num">${i + 1}</span>`}
           <span class="progress-title">${escapeHtml(v.title)}</span>
           ${sendBtn}
-          <span class="video-status-badge status-${v.status}">${statusLabel}</span>
+          <span class="video-status-badge status-${cardStatus}">${statusLabel}</span>
         </div>
-        ${videoTimeHtml(v)}
-        <div class="progress-account">${v.account ? `账号: ${escapeHtml(v.account)}` : ""}</div>
+        ${compact ? "" : videoTimeHtml(v)}
+        <div class="progress-account">${v.account && !compact ? `账号: ${escapeHtml(v.account)}` : ""}</div>
         <div class="progress-msg">${progressMessageHtml(v)}</div>
         <div class="channel-tags">${channelTagsHtml(v.channels)}</div>
       </div>
@@ -1567,31 +1611,36 @@ function renderVideoProgressFull(videos, taskStatus, task = state.taskDetail) {
   const doneWrap = $("#videoProgressDoneWrap");
   const doneList = $("#videoProgressDoneList");
   const doneLabel = $("#doneVideosToggleLabel");
-  const toggleBtn = $("#toggleDoneVideosBtn");
+  const toggleDoneBtn = $("#toggleDoneVideosBtn");
+  const failedWrap = $("#videoProgressFailedWrap");
+  const failedList = $("#videoProgressFailedList");
+  const failedLabel = $("#failedVideosToggleLabel");
+  const toggleFailedBtn = $("#toggleFailedVideosBtn");
 
   if (!videos.length) {
     list.innerHTML = '<div class="empty-hint">暂无视频</div>';
     doneWrap?.classList.add("hidden");
+    failedWrap?.classList.add("hidden");
     state.progressFp = "";
     list.dataset.fp = "";
     return;
   }
 
-  const { active, done } = splitProgressForDisplay(videos, task);
+  const { active, done, failed } = splitProgressForDisplay(videos, task);
 
   list.innerHTML = active.length
     ? active.map((v, i) => buildProgressCardHtml(v, i, taskStatus)).join("")
     : '<div class="empty-hint">暂无待发送视频</div>';
 
-  if (doneWrap && doneList && doneLabel && toggleBtn) {
+  if (doneWrap && doneList && doneLabel && toggleDoneBtn) {
     if (done.length) {
       doneWrap.classList.remove("hidden");
       doneLabel.textContent = `已发完 ${done.length} 条`;
-      toggleBtn.setAttribute("aria-expanded", state.doneVideosExpanded ? "true" : "false");
-      toggleBtn.classList.toggle("expanded", state.doneVideosExpanded);
+      toggleDoneBtn.setAttribute("aria-expanded", state.doneVideosExpanded ? "true" : "false");
+      toggleDoneBtn.classList.toggle("expanded", state.doneVideosExpanded);
       doneList.classList.toggle("hidden", !state.doneVideosExpanded);
       doneList.innerHTML = state.doneVideosExpanded
-        ? done.map((v, i) => buildProgressCardHtml(v, i, taskStatus)).join("")
+        ? done.map((v, i) => buildProgressCardHtml(v, i, taskStatus, { compact: true })).join("")
         : "";
     } else {
       doneWrap.classList.add("hidden");
@@ -1600,20 +1649,38 @@ function renderVideoProgressFull(videos, taskStatus, task = state.taskDetail) {
     }
   }
 
+  if (failedWrap && failedList && failedLabel && toggleFailedBtn) {
+    if (failed.length) {
+      failedWrap.classList.remove("hidden");
+      failedLabel.textContent = `发送失败 ${failed.length} 条`;
+      toggleFailedBtn.setAttribute("aria-expanded", state.failedVideosExpanded ? "true" : "false");
+      toggleFailedBtn.classList.toggle("expanded", state.failedVideosExpanded);
+      failedList.classList.toggle("hidden", !state.failedVideosExpanded);
+      failedList.innerHTML = state.failedVideosExpanded
+        ? failed.map((v, i) => buildProgressCardHtml(v, i, taskStatus, { compact: true })).join("")
+        : "";
+    } else {
+      failedWrap.classList.add("hidden");
+      failedList.innerHTML = "";
+      failedList.classList.add("hidden");
+    }
+  }
+
   const sortKey = `${task?.source || ""}|${task?.search_sort || ""}|${task?.platform || ""}`;
-  const expanded = state.doneVideosExpanded ? "1" : "0";
+  const expanded = `${state.doneVideosExpanded ? "1" : "0"}|${state.failedVideosExpanded ? "1" : "0"}`;
   state.progressFp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}|${sortKey}`;
   list.dataset.fp = state.progressFp;
 }
 
 function patchProgressCard(card, v, taskStatus) {
-  card.className = `progress-card status-${v.status}`;
+  const cardStatus = isProgressVideoFailed(v) ? "failed" : v.status;
+  card.className = `progress-card status-${cardStatus}`;
   const badge = card.querySelector(".video-status-badge");
   if (badge) {
-    badge.textContent = VIDEO_STATUS[v.status] || v.status;
-    badge.className = `video-status-badge status-${v.status}`;
+    badge.textContent = isProgressVideoFailed(v) ? "发送失败" : (VIDEO_STATUS[v.status] || v.status);
+    badge.className = `video-status-badge status-${cardStatus}`;
   }
-  const showSend = canManualSend(v, taskStatus);
+  const showSend = !isProgressVideoFailed(v) && canManualSend(v, taskStatus);
   const sending = state.sendingVideos.has(v.id);
   let btn = card.querySelector(".btn-send-video");
   if (showSend) {
@@ -1640,7 +1707,7 @@ function patchProgressCard(card, v, taskStatus) {
   const account = card.querySelector(".progress-account");
   if (account) account.textContent = v.account ? `账号: ${v.account}` : "";
   const msg = card.querySelector(".progress-msg");
-  if (msg) msg.textContent = v.message || "";
+  if (msg) msg.innerHTML = progressMessageHtml(v);
   const tags = card.querySelector(".channel-tags");
   if (tags) tags.innerHTML = channelTagsHtml(v.channels);
 }
@@ -1651,7 +1718,7 @@ function updateVideoProgress(
   taskStatus = state.taskDetail?.status,
   task = state.taskDetail,
 ) {
-  const expanded = state.doneVideosExpanded ? "1" : "0";
+  const expanded = `${state.doneVideosExpanded ? "1" : "0"}|${state.failedVideosExpanded ? "1" : "0"}`;
   const sortKey = `${task?.source || ""}|${task?.search_sort || ""}|${task?.platform || ""}`;
   const fp = `${progressFingerprint(videos)}|${taskStatus || ""}|${expanded}|${sortKey}`;
 
@@ -1794,6 +1861,9 @@ function setDialogMode(mode) {
   $("#dialogCreate").textContent = isEdit ? "保存任务" : "创建任务";
   document.querySelector(".dialog-main-tabs")?.classList.toggle("hidden", isEdit);
   updateRecurringButtonLabel();
+  if (isDialogCollectionMode()) {
+    updateCollectionSectionMode();
+  }
 }
 
 function setDouyinSubTab(subTab) {
@@ -1825,14 +1895,14 @@ function setDouyinSubTab(subTab) {
   $("#dialogCreateRecurring")?.classList.toggle("hidden", isLinks);
   updateRecurringButtonLabel();
   if (isCollection) {
-    loadDouyinAccountOptions();
+    updateCollectionSectionMode();
   }
   if (isLinks && dialog.mode === "create" && !dialog.videos.length) {
     $("#dialogVideoList").innerHTML = '<div class="empty-hint">可选：粘贴链接后解析，也可直接创建空任务</div>';
   } else if (isKeyword && dialog.mode === "create" && !dialog.videos.length) {
     $("#dialogVideoList").innerHTML = '<div class="empty-hint">搜索后选择视频</div>';
   } else if (isCollection && dialog.mode === "create" && !dialog.videos.length) {
-    $("#dialogVideoList").innerHTML = '<div class="empty-hint">选择账号后点击「加载收藏」</div>';
+    $("#dialogVideoList").innerHTML = '<div class="empty-hint">加载账号与收藏夹后，点击「加载视频」</div>';
   }
   updateDialogPlatformUI();
   updateDialogBtns();
@@ -1867,8 +1937,12 @@ function openDialog() {
   dialog.tab = "bili";
   dialog.douyinSubTab = "keyword";
   dialog.douyinCookieIndex = 0;
+  dialog.douyinCollectsId = "";
+  dialog.douyinFolders = [];
+  dialog.douyinAccounts = [];
   dialog.collectionCursor = 0;
   dialog.collectionHasMore = false;
+  dialog.savedCollectionLabel = "";
   dialog.editTaskId = null;
   dialog.lockedVideoIds = new Set();
   dialog.platform = "bili";
@@ -1879,6 +1953,8 @@ function openDialog() {
   dialog.selectedAccounts = new Set(state.accounts.map((a) => a.id));
   dialog.cron = "";
   dialog.searchSort = "recent";
+  dialog.includeTopics = true;
+  $("#dialogIncludeTopics").checked = true;
   $("#dialogCustomLinks").value = "";
   $("#dialogKeyword").value = "";
   $("#dialogBiliPages").value = "1";
@@ -1916,6 +1992,12 @@ function openEditDialog() {
   dialog.tab = isCustom || isCollection || isDouyinSearch ? "douyin" : (t.platform || "bili");
   dialog.douyinSubTab = isCustom ? "links" : (isCollection ? "collection" : (isDouyinSearch ? "keyword" : "keyword"));
   dialog.douyinCookieIndex = isCollection ? (t.douyin_cookie_index ?? 0) : 0;
+  dialog.douyinCollectsId = isCollection ? (t.douyin_collects_id || "") : "";
+  dialog.douyinAccounts = [];
+  dialog.douyinFolders = [];
+  dialog.savedCollectionLabel = isCollection ? (t.collection_account_label || "").trim() : "";
+  dialog.collectionCursor = 0;
+  dialog.collectionHasMore = false;
   dialog.lockedVideoIds = new Set(
     (t.video_progress || [])
       .filter((vp) => vp.status === "done" || vp.status === "skipped")
@@ -1925,6 +2007,7 @@ function openEditDialog() {
   dialog.channelFilter = "all";
   dialog.selectedChannels = new Set((t.channels || []).map((ch) => channelKey(ch)));
   dialog.selectedAccounts = new Set(t.account_ids || []);
+  dialog.includeTopics = t.include_topics !== false;
 
   const payloadVideos = (t.videos || []).map((v) => ({
     ...v,
@@ -1947,6 +2030,7 @@ function openEditDialog() {
   dialog.selectedVideos = new Set(dialog.videos.map((v) => v.id));
 
   $("#dialogKeyword").value = t.keyword || "";
+  $("#dialogIncludeTopics").checked = dialog.includeTopics;
   $("#dialogBiliPages").value = "1";
   setDialogSearchSort(t.search_sort || "recent");
   applyScheduleToDialog(t);
@@ -2174,45 +2258,223 @@ function getDialogCollectionAccountLabel() {
   const idx = dialog.douyinCookieIndex ?? 0;
   const acc = (dialog.douyinAccounts || []).find((a) => a.index === idx);
   if (acc?.nickname) return acc.nickname;
-  if (acc?.label && acc.label !== "加载中…") return acc.label;
-  const select = $("#dialogDouyinAccount");
-  const opt = select?.selectedOptions?.[0];
-  if (!opt?.value || opt.value === "") return "";
-  const text = (opt.textContent || "").split(" (")[0].trim();
-  if (!text || text === "加载中…" || text.startsWith("请先在设置")) return "";
-  return text;
+  if (acc?.label) return acc.label;
+  return "";
 }
 
-async function loadDouyinAccountOptions() {
-  const select = $("#dialogDouyinAccount");
-  if (!select) return;
-  select.innerHTML = '<option value="">加载中…</option>';
+function getDialogCollectionFolderLabel() {
+  if (!dialog.douyinCollectsId) return "默认";
+  const f = (dialog.douyinFolders || []).find((x) => x.id === dialog.douyinCollectsId);
+  return f?.name || dialog.douyinCollectsId;
+}
+
+function getDialogCollectionSourceLabel() {
+  const account = getDialogCollectionAccountLabel();
+  const folder = getDialogCollectionFolderLabel();
+  if (account && folder) return `${account} · ${folder}`;
+  if (account) return account;
+  if (folder) return folder;
+  return "";
+}
+
+function getSavedCollectionAccountDisplay() {
+  const label = (dialog.savedCollectionLabel || "").trim();
+  if (label.includes(" · ")) return label.split(" · ")[0].trim();
+  if (label) return label;
+  return `账号 ${(dialog.douyinCookieIndex ?? 0) + 1}`;
+}
+
+function getSavedCollectionFolderDisplay() {
+  const label = (dialog.savedCollectionLabel || "").trim();
+  if (label.includes(" · ")) {
+    const folder = label.split(" · ").slice(1).join(" · ").trim();
+    if (folder) return folder;
+  }
+  return dialog.douyinCollectsId ? dialog.douyinCollectsId : "默认（视频列表）";
+}
+
+function updateCollectionSectionMode() {
+  const isEdit = dialog.mode === "edit";
+  const hint = $("#collectionSectionHint");
+  const editInfo = $("#collectionEditInfo");
+  const createFlow = $("#collectionCreateFlow");
+  if (hint) {
+    hint.textContent = isEdit
+      ? "收藏来源已绑定至任务，编辑时不可更换"
+      : "按步骤选择账号与收藏夹，再加载视频列表";
+  }
+  editInfo?.classList.toggle("hidden", !isEdit);
+  createFlow?.classList.toggle("hidden", isEdit);
+  if (isEdit) {
+    const accountEl = $("#collectionEditAccount");
+    const folderEl = $("#collectionEditFolder");
+    if (accountEl) accountEl.textContent = getSavedCollectionAccountDisplay();
+    if (folderEl) folderEl.textContent = getSavedCollectionFolderDisplay();
+    return;
+  }
+  renderDouyinAccountBtns();
+  renderDouyinFolderBtns();
+}
+
+function renderDouyinAccountBtns() {
+  const container = $("#dialogDouyinAccountBtns");
+  if (!container || dialog.mode === "edit") return;
+  const accounts = dialog.douyinAccounts || [];
+  if (!accounts.length) {
+    container.innerHTML = '<div class="empty-hint">点击「加载账号」</div>';
+    return;
+  }
+  container.innerHTML = accounts.map((a) => {
+    const label = a.nickname ? `${a.label} (${a.index + 1})` : a.label;
+    const err = a.error ? ` — ${a.error}` : "";
+    const active = dialog.douyinCookieIndex === a.index;
+    return `
+      <button type="button" class="toggle-btn${active ? " active" : ""}"
+              data-douyin-account="${a.index}">
+        ${escapeHtml(label + err)}
+      </button>`;
+  }).join("");
+}
+
+function renderDouyinFolderBtns() {
+  const container = $("#dialogDouyinFolderBtns");
+  if (!container || dialog.mode === "edit") return;
+  const folders = dialog.douyinFolders || [];
+  if (!dialog.douyinAccounts.length) {
+    container.innerHTML = '<div class="empty-hint">先选账号，再点击「加载收藏夹」</div>';
+    return;
+  }
+  if (!folders.length) {
+    container.innerHTML = '<div class="empty-hint">点击「加载收藏夹」</div>';
+    return;
+  }
+  const items = [{ id: "", name: "默认（视频列表）" }, ...folders];
+  container.innerHTML = items.map((f) => {
+    const active = (dialog.douyinCollectsId || "") === (f.id || "");
+    return `
+      <button type="button" class="toggle-btn${active ? " active" : ""}"
+              data-douyin-folder="${escapeAttr(f.id || "")}">
+        ${escapeHtml(f.name || f.id || "默认")}
+      </button>`;
+  }).join("");
+}
+
+function selectDouyinAccount(index) {
+  dialog.douyinCookieIndex = index;
+  dialog.douyinCollectsId = "";
+  dialog.douyinFolders = [];
+  dialog.collectionCursor = 0;
+  dialog.collectionHasMore = false;
+  $("#dialogCollectionMoreBtn")?.classList.add("hidden");
+  renderDouyinAccountBtns();
+  renderDouyinFolderBtns();
+}
+
+function selectDouyinFolder(folderId) {
+  dialog.douyinCollectsId = folderId || "";
+  dialog.collectionCursor = 0;
+  dialog.collectionHasMore = false;
+  $("#dialogCollectionMoreBtn")?.classList.add("hidden");
+  renderDouyinFolderBtns();
+}
+
+async function fetchDouyinAccounts() {
+  const btn = $("#dialogLoadDouyinAccountsBtn");
+  const status = $("#dialogSearchStatus");
+  if (btn?.disabled) return;
+  btn.disabled = true;
+  if (status) {
+    status.className = "status-bar loading";
+    status.textContent = "正在加载抖音账号…";
+    status.classList.remove("hidden");
+  }
   try {
     const data = await api("/api/douyin/cookie-accounts");
     const accounts = data.accounts || [];
     dialog.douyinAccounts = accounts;
     if (!accounts.length) {
-      select.innerHTML = '<option value="">请先在设置页配置抖音 Cookie</option>';
+      $("#dialogDouyinAccountBtns").innerHTML =
+        '<div class="empty-hint">请先在设置页配置抖音 Cookie</div>';
+      if (status) {
+        status.className = "status-bar error";
+        status.textContent = "未配置抖音 Cookie";
+      }
       return;
     }
-    select.innerHTML = accounts.map((a) => {
-      const label = a.nickname ? `${a.label} (${a.index + 1})` : a.label;
-      const err = a.error ? ` — ${a.error}` : "";
-      return `<option value="${a.index}">${escapeHtml(label + err)}</option>`;
-    }).join("");
-    const idx = String(dialog.douyinCookieIndex ?? 0);
-    if ([...select.options].some((o) => o.value === idx)) {
-      select.value = idx;
+    const prev = dialog.douyinCookieIndex ?? 0;
+    const hasPrev = accounts.some((a) => a.index === prev);
+    dialog.douyinCookieIndex = hasPrev ? prev : accounts[0].index;
+    dialog.douyinCollectsId = "";
+    dialog.douyinFolders = [];
+    renderDouyinAccountBtns();
+    renderDouyinFolderBtns();
+    if (status) {
+      status.className = "status-bar success";
+      status.textContent = `已加载 ${accounts.length} 个账号，请点击选择`;
     }
   } catch (e) {
-    select.innerHTML = `<option value="">${escapeHtml(e.message)}</option>`;
+    if (status) {
+      status.className = "status-bar error";
+      status.textContent = `账号加载失败: ${e.message}`;
+    }
+    renderDouyinAccountBtns();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function fetchDouyinFolders() {
+  const btn = $("#dialogLoadDouyinFoldersBtn");
+  const status = $("#dialogSearchStatus");
+  if (btn?.disabled) return;
+  if (!dialog.douyinAccounts.length) {
+    alert("请先加载并选择账号");
+    return;
+  }
+  btn.disabled = true;
+  if (status) {
+    status.className = "status-bar loading";
+    status.textContent = "正在加载收藏夹列表…";
+    status.classList.remove("hidden");
+  }
+  try {
+    const data = await api("/api/douyin/collects-list", {
+      method: "POST",
+      body: JSON.stringify({ cookie_index: dialog.douyinCookieIndex ?? 0 }),
+    });
+    dialog.douyinFolders = data.folders || [];
+    const prev = dialog.douyinCollectsId || "";
+    const hasPrev = !prev || dialog.douyinFolders.some((f) => f.id === prev);
+    dialog.douyinCollectsId = hasPrev ? prev : "";
+    renderDouyinFolderBtns();
+    if (data.error && !dialog.douyinFolders.length) {
+      if (status) {
+        status.className = "status-bar error";
+        status.textContent = `收藏夹加载失败: ${data.error}`;
+      }
+    } else if (status) {
+      status.className = "status-bar success";
+      const extra = data.error ? `（${data.error}）` : "";
+      status.textContent = `已加载 ${dialog.douyinFolders.length} 个收藏夹${extra}，请点击选择`;
+    }
+  } catch (e) {
+    dialog.douyinFolders = [];
+    renderDouyinFolderBtns();
+    if (status) {
+      status.className = "status-bar error";
+      status.textContent = `收藏夹加载失败: ${e.message}`;
+    }
+  } finally {
+    btn.disabled = false;
   }
 }
 
 async function dialogFetchCollection(reset = true) {
-  const select = $("#dialogDouyinAccount");
-  const cookieIndex = select?.value === "" ? 0 : Number(select?.value || 0);
-  dialog.douyinCookieIndex = cookieIndex;
+  if (!dialog.douyinAccounts.length) {
+    alert("请先加载并选择账号");
+    return;
+  }
+  const cookieIndex = dialog.douyinCookieIndex ?? 0;
   const status = $("#dialogSearchStatus");
   const btn = $("#dialogCollectionBtn");
   const moreBtn = $("#dialogCollectionMoreBtn");
@@ -2230,7 +2492,12 @@ async function dialogFetchCollection(reset = true) {
   try {
     const data = await api("/api/douyin/collection", {
       method: "POST",
-      body: JSON.stringify({ cookie_index: cookieIndex, cursor, count: 20 }),
+      body: JSON.stringify({
+        cookie_index: cookieIndex,
+        collects_id: dialog.douyinCollectsId || "",
+        cursor,
+        count: 20,
+      }),
     });
     const videos = data.videos || [];
     if (reset) {
@@ -2271,9 +2538,11 @@ async function dialogFetchCollection(reset = true) {
 }
 
 async function dialogFetchCollectionAll() {
-  const select = $("#dialogDouyinAccount");
-  const cookieIndex = select?.value === "" ? 0 : Number(select?.value || 0);
-  dialog.douyinCookieIndex = cookieIndex;
+  if (!dialog.douyinAccounts.length) {
+    alert("请先加载并选择账号");
+    return;
+  }
+  const cookieIndex = dialog.douyinCookieIndex ?? 0;
   const status = $("#dialogSearchStatus");
   const btn = $("#dialogCollectionAllBtn");
   const loadBtn = $("#dialogCollectionBtn");
@@ -2292,6 +2561,7 @@ async function dialogFetchCollectionAll() {
       method: "POST",
       body: JSON.stringify({
         cookie_index: cookieIndex,
+        collects_id: dialog.douyinCollectsId || "",
         fetch_all: true,
         max_items: 2000,
         count: 20,
@@ -2527,6 +2797,10 @@ async function dialogSearch() {
   }
 }
 
+function readIncludeTopicsFromDialog() {
+  return $("#dialogIncludeTopics")?.checked !== false;
+}
+
 async function submitDialog(taskType) {
   const channels = getDialogChannels();
   const accountIds = getDialogAccounts();
@@ -2556,8 +2830,16 @@ async function submitDialog(taskType) {
     task_type: taskType,
     source,
     douyin_cookie_index: isCollection ? dialog.douyinCookieIndex : 0,
+    douyin_collects_id: isCollection ? (dialog.douyinCollectsId || "") : "",
     collection_account_label: isCollection
-      ? (getDialogCollectionAccountLabel() || `账号 ${(dialog.douyinCookieIndex ?? 0) + 1}`)
+      ? (
+        dialog.mode === "edit"
+          ? dialog.savedCollectionLabel
+          : (
+            getDialogCollectionSourceLabel()
+            || `账号 ${(dialog.douyinCookieIndex ?? 0) + 1}`
+          )
+      )
       : "",
     videos: videos.map((v) => ({
       id: v.id,
@@ -2571,6 +2853,7 @@ async function submitDialog(taskType) {
     channels,
     account_ids: accountIds,
     search_sort: getDialogSearchSort(),
+    include_topics: readIncludeTopicsFromDialog(),
     ...readScheduleFromDialog(),
   };
 
@@ -3090,7 +3373,7 @@ function bindEvents() {
           if (sub === "links") {
             $("#dialogVideoList").innerHTML = '<div class="empty-hint">可选：粘贴链接后解析，也可直接创建空任务</div>';
           } else if (sub === "collection") {
-            $("#dialogVideoList").innerHTML = '<div class="empty-hint">选择账号后点击「加载收藏」</div>';
+            $("#dialogVideoList").innerHTML = '<div class="empty-hint">加载账号与收藏夹后，点击「加载视频」</div>';
           } else {
             $("#dialogVideoList").innerHTML = '<div class="empty-hint">搜索后选择视频</div>';
           }
@@ -3121,11 +3404,18 @@ function bindEvents() {
     });
   });
 
-  $("#dialogDouyinAccount")?.addEventListener("change", () => {
-    dialog.douyinCookieIndex = Number($("#dialogDouyinAccount").value || 0);
-    dialog.collectionCursor = 0;
-    dialog.collectionHasMore = false;
-    $("#dialogCollectionMoreBtn")?.classList.add("hidden");
+  $("#dialogLoadDouyinAccountsBtn")?.addEventListener("click", fetchDouyinAccounts);
+  $("#dialogLoadDouyinFoldersBtn")?.addEventListener("click", fetchDouyinFolders);
+  $("#collectionSection")?.addEventListener("click", (e) => {
+    const accBtn = e.target.closest("[data-douyin-account]");
+    if (accBtn) {
+      selectDouyinAccount(Number(accBtn.dataset.douyinAccount));
+      return;
+    }
+    const folderBtn = e.target.closest("[data-douyin-folder]");
+    if (folderBtn) {
+      selectDouyinFolder(folderBtn.dataset.douyinFolder || "");
+    }
   });
   $("#dialogCollectionBtn")?.addEventListener("click", () => dialogFetchCollection(true));
   $("#dialogCollectionMoreBtn")?.addEventListener("click", () => dialogFetchCollection(false));
@@ -3226,6 +3516,15 @@ function bindEvents() {
   $("#videoProgressDoneWrap")?.addEventListener("click", (e) => {
     if (e.target.closest("#toggleDoneVideosBtn")) {
       state.doneVideosExpanded = !state.doneVideosExpanded;
+      if (state.taskDetail) {
+        updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status, state.taskDetail);
+      }
+    }
+  });
+
+  $("#videoProgressFailedWrap")?.addEventListener("click", (e) => {
+    if (e.target.closest("#toggleFailedVideosBtn")) {
+      state.failedVideosExpanded = !state.failedVideosExpanded;
       if (state.taskDetail) {
         updateVideoProgress(state.taskDetail.video_progress || [], true, state.taskDetail.status, state.taskDetail);
       }

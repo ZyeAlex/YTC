@@ -412,7 +412,7 @@ def _set_video(task: TaskState, vi: int, **kwargs):
     _persist_tasks()
 
 
-def _set_channel(task: TaskState, vi: int, ci: int, status: str):
+def _set_channel(task: TaskState, vi: int, ci: int, status: str, *, error: str = ""):
     if not _task_alive(task.task_id):
         return
     if vi < 0 or vi >= len(task.video_progress):
@@ -423,7 +423,55 @@ def _set_channel(task: TaskState, vi: int, ci: int, status: str):
     chs[ci]["status"] = status
     if status == CH_DONE:
         chs[ci]["sent_at"] = _now_str()
+        chs[ci].pop("error", None)
+    elif status == CH_FAILED and error:
+        chs[ci]["error"] = error[:120]
     _persist_tasks()
+
+
+def _channel_error_text(ch: dict) -> str:
+    return (ch.get("error") or "").strip()
+
+
+def _video_has_content_rejection(vp: dict) -> bool:
+    if "10000" in (vp.get("message") or ""):
+        return True
+    return any("10000" in _channel_error_text(c) for c in vp.get("channels", []))
+
+
+def _repair_fatal_post_videos(task: TaskState) -> int:
+    """将内容被拒或全部频道失败但仍留在待发队列的视频移入 failed。"""
+    fixed = 0
+    for vp in task.video_progress:
+        if vp.get("status") == VIDEO_FAILED:
+            continue
+        chs = vp.get("channels", [])
+        if not chs:
+            continue
+        done_n = sum(1 for c in chs if c.get("status") == CH_DONE)
+        failed_n = sum(1 for c in chs if c.get("status") == CH_FAILED)
+        if done_n > 0:
+            continue
+        if failed_n == 0:
+            continue
+
+        if _video_has_content_rejection(vp):
+            for c in chs:
+                if c.get("status") in (CH_PENDING, CH_POSTING):
+                    c["status"] = CH_FAILED
+                    c["error"] = "内容被拒，已跳过"
+            vp["status"] = VIDEO_FAILED
+            vp["message"] = "内容被平台拒绝（错误码 10000）"
+            fixed += 1
+            continue
+
+        if failed_n == len(chs):
+            vp["status"] = VIDEO_FAILED
+            vp["message"] = vp.get("message") or f"全部频道失败 ({failed_n})"
+            fixed += 1
+    if fixed:
+        _persist_tasks()
+    return fixed
 
 
 def _account_names(account_ids: list[str]) -> list[str]:
@@ -503,6 +551,10 @@ def _merge_task_videos_on_update(
     return merged_videos, merged_progress
 
 
+def _tasks_by_name() -> list[TaskState]:
+    return sorted(_tasks.values(), key=lambda t: (t.name or "").casefold())
+
+
 def _task_summary(task: TaskState) -> dict:
     done = sum(1 for v in task.video_progress if v["status"] in (VIDEO_DONE, VIDEO_SKIPPED))
     payload = task.payload
@@ -521,7 +573,9 @@ def _task_summary(task: TaskState) -> dict:
         "batch_count": payload.get("batch_count", 0),
         "source": payload.get("source", SOURCE_SEARCH),
         "douyin_cookie_index": int(payload.get("douyin_cookie_index", 0)),
+        "douyin_collects_id": payload.get("douyin_collects_id", ""),
         "collection_account_label": payload.get("collection_account_label", ""),
+        "include_topics": bool(payload.get("include_topics", True)),
         "created_at": task.created_at,
         "started_at": task.started_at,
         "finished_at": task.finished_at,
@@ -554,7 +608,7 @@ def _persist_tasks():
                 "payload": t.payload,
                 "video_progress": t.video_progress,
             }
-            for t in sorted(_tasks.values(), key=lambda x: x.created_at, reverse=True)
+            for t in _tasks_by_name()
         ]
     }
     ACTIVE_TASKS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -650,8 +704,7 @@ def _load_tasks_from_disk():
 
 
 def list_tasks() -> list[dict]:
-    items = sorted(_tasks.values(), key=lambda x: x.created_at, reverse=True)
-    return [_task_summary(t) for t in items]
+    return [_task_summary(t) for t in _tasks_by_name()]
 
 
 def get_task(task_id: str) -> TaskState | None:
@@ -660,7 +713,10 @@ def get_task(task_id: str) -> TaskState | None:
 
 def get_task_detail(task_id: str) -> dict | None:
     task = get_task(task_id)
-    return _task_detail(task) if task else None
+    if not task:
+        return None
+    _repair_fatal_post_videos(task)
+    return _task_detail(task)
 
 
 def delete_task(task_id: str) -> bool:
@@ -800,8 +856,14 @@ def update_task(task_id: str, payload: dict, keyword: str = "") -> bool:
         "douyin_cookie_index": int(
             payload.get("douyin_cookie_index", task.payload.get("douyin_cookie_index", 0))
         ),
+        "douyin_collects_id": payload.get(
+            "douyin_collects_id", task.payload.get("douyin_collects_id", "")
+        ),
         "collection_account_label": payload.get(
             "collection_account_label", task.payload.get("collection_account_label", "")
+        ),
+        "include_topics": bool(
+            payload.get("include_topics", task.payload.get("include_topics", True))
         ),
     }
     new_payload = _apply_schedule_to_payload(new_payload)
@@ -902,10 +964,12 @@ def sync_collection_videos(task_id: str) -> dict:
         raise ValueError("仅收藏夹任务支持同步收藏")
 
     cookie_index = int(task.payload.get("douyin_cookie_index", 0))
+    collects_id = str(task.payload.get("douyin_collects_id", "") or "")
     existing = _existing_video_ids(task)
     result = fetch_douyin_collection_new(
         cookie_index,
         existing,
+        collects_id=collects_id,
         existing_newest_ids=_task_head_video_ids(task),
     )
     if result.get("error") and not result.get("videos"):
@@ -916,7 +980,14 @@ def sync_collection_videos(task_id: str) -> dict:
             raise ValueError(err)
 
     fresh = result.get("videos") or []
-    should_resume = bool(fresh and task.status == STATUS_PAUSED and task.started_at)
+    should_resume = bool(
+        fresh
+        and task.started_at
+        and (
+            task.status == STATUS_PAUSED
+            or (task.status == STATUS_RUNNING and task_id not in _active_loops)
+        )
+    )
 
     if fresh:
         _prepend_collection_videos(task, fresh)
@@ -948,7 +1019,19 @@ def sync_collection_videos(task_id: str) -> dict:
 
 def start_task(task_id: str) -> bool:
     task = get_task(task_id)
-    if not task or task.status not in (STATUS_CREATED, STATUS_PAUSED):
+    if not task:
+        return False
+    if task.status == STATUS_RUNNING:
+        if task_id in _active_loops:
+            return False
+        if not _task_has_send_work(task) and not (
+            _is_recurring(task) and _all_videos_terminal(task)
+        ):
+            return False
+        _paused.discard(task_id)
+        asyncio.create_task(_run_batch_task(task_id))
+        return True
+    if task.status not in (STATUS_CREATED, STATUS_PAUSED):
         return False
     _paused.discard(task_id)
     task.status = STATUS_RUNNING
@@ -994,6 +1077,39 @@ def _all_videos_terminal(task: TaskState) -> bool:
     )
 
 
+def _task_has_send_work(task: TaskState) -> bool:
+    """是否还有待自动发送/续发的视频。"""
+    for vp in task.video_progress:
+        st = vp.get("status")
+        if st in (VIDEO_PENDING, VIDEO_WAITING, VIDEO_DOWNLOADING):
+            return True
+        if st == VIDEO_POSTING and not _video_all_channels_done(vp):
+            return True
+    return False
+
+
+def _collection_task_idle(task: TaskState) -> bool:
+    """收藏夹长期任务：本批已发完且暂无待发送项。"""
+    return (
+        _is_recurring(task)
+        and _is_collection_source(task)
+        and not _task_has_send_work(task)
+    )
+
+
+def _should_kick_task_loop(task_id: str, task: TaskState) -> bool:
+    """运行中但协程已退出，且仍有工作可做。"""
+    if task.status != STATUS_RUNNING or task_id in _active_loops:
+        return False
+    if _collection_task_idle(task):
+        return False
+    return _task_has_send_work(task) or (
+        _is_recurring(task)
+        and _all_videos_terminal(task)
+        and not _is_collection_source(task)
+    )
+
+
 def _existing_video_ids(task: TaskState) -> set[str]:
     return {vid for v in task.video_progress if (vid := v.get("id"))}
 
@@ -1030,12 +1146,14 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> int:
         from backend.services.douyin_collection import fetch_douyin_collection_new
 
         cookie_index = int(payload.get("douyin_cookie_index", 0))
+        collects_id = str(payload.get("douyin_collects_id", "") or "")
         newest_ids = _task_head_video_ids(task)
 
         def _pull():
             return fetch_douyin_collection_new(
                 cookie_index,
                 existing,
+                collects_id=collects_id,
                 existing_newest_ids=newest_ids,
             )
 
@@ -1284,11 +1402,20 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
         if not await _interruptible_sleep(30, task_id):
             return
 
+        if _is_collection_source(task):
+            added = await _fetch_and_append_batch(task_id, task)
+            if added <= 0:
+                _log(
+                    task,
+                    "info",
+                    "收藏夹暂无新视频，任务待机（有新收藏时点击「同步收藏」）",
+                )
+            return
+
         while not _aborted(task_id):
             if await _fetch_and_append_batch(task_id, task) > 0:
                 break
-            retry_label = "同步收藏" if _is_collection_source(task) else "搜索"
-            _log(task, "info", f"暂无新视频，60 秒后重新{retry_label}...")
+            _log(task, "info", "暂无新视频，60 秒后重新搜索...")
             if not await _interruptible_sleep(60, task_id):
                 return
 
@@ -1321,8 +1448,15 @@ async def _post_to_channels(
         _set_channel(task, vi, i, CH_POSTING)
         _log(task, "info", f"📤 {ch_name}（{account_label(account_id)}）")
 
-        ok, err_type = await asyncio.to_thread(
-            publish_video, guild_id, channel_id, output_path, title, account_id
+        include_topics = bool(task.payload.get("include_topics", True))
+        ok, err_type, err_detail = await asyncio.to_thread(
+            publish_video,
+            guild_id,
+            channel_id,
+            output_path,
+            title,
+            account_id,
+            include_topics=include_topics,
         )
 
         if ok:
@@ -1340,8 +1474,14 @@ async def _post_to_channels(
                 others = [a for a in account_ids if a != account_id] or account_ids
                 retry_account = pick_random_account(others)
                 retry_label = account_label(retry_account)
-                ok2, _ = await asyncio.to_thread(
-                    publish_video, guild_id, channel_id, output_path, title, retry_account
+                ok2, _, err_detail2 = await asyncio.to_thread(
+                    publish_video,
+                    guild_id,
+                    channel_id,
+                    output_path,
+                    title,
+                    retry_account,
+                    include_topics=include_topics,
                 )
                 if ok2:
                     posted.append(ch_name)
@@ -1352,21 +1492,39 @@ async def _post_to_channels(
                 account_id = retry_account
             if not retry_ok:
                 failed.append(ch_name)
-                _set_channel(task, vi, i, CH_FAILED)
+                _set_channel(task, vi, i, CH_FAILED, error=err_detail2 or "限流换号失败")
                 _log(task, "error", f"❌ {ch_name} 换号3次仍失败")
         elif err_type == "permission":
             failed.append(ch_name)
-            _set_channel(task, vi, i, CH_FAILED)
-            _log(task, "warn", f"⚠️ {ch_name} 无权限")
+            _set_channel(task, vi, i, CH_FAILED, error=err_detail)
+            _log(task, "warn", f"⚠️ {ch_name} 无权限{f'：{err_detail}' if err_detail else ''}")
+        elif err_type == "content_rejected":
+            failed.append(ch_name)
+            _set_channel(task, vi, i, CH_FAILED, error=err_detail)
+            _log(task, "error", f"❌ {ch_name} 内容被拒绝：{err_detail[:120]}")
+            for j in range(i + 1, len(channels)):
+                if j >= len(ch_prog) or ch_prog[j].get("status") in (CH_DONE, CH_FAILED):
+                    continue
+                rest_name = channels[j].get("name", f"频道{j + 1}")
+                failed.append(rest_name)
+                _set_channel(task, vi, j, CH_FAILED, error="内容被拒，已跳过")
+            _set_video(task, vi, status=VIDEO_FAILED, message="内容被平台拒绝（错误码 10000）")
+            return posted, failed, False
         elif err_type == "oidb_limit":
             failed.append(ch_name)
-            _set_channel(task, vi, i, CH_FAILED)
+            _set_channel(task, vi, i, CH_FAILED, error=err_detail)
             _log(task, "error", f"❌ {ch_name} 全局OIDB限流")
             return posted, failed, True
         else:
             failed.append(ch_name)
-            _set_channel(task, vi, i, CH_FAILED)
-            _log(task, "error", f"❌ {ch_name} 发帖失败")
+            _set_channel(task, vi, i, CH_FAILED, error=err_detail or err_type or "未知错误")
+            detail = err_detail or err_type or "未知错误"
+            _log(task, "error", f"❌ {ch_name} 发帖失败：{detail[:120]}")
+            _set_video(
+                task,
+                vi,
+                message=f"{ch_name} 发帖失败：{detail[:80]}",
+            )
 
         if i < len(channels) - 1:
             wait_sec = random.randint(CHANNEL_INTERVAL_MIN, CHANNEL_INTERVAL_MAX)
@@ -1672,6 +1830,8 @@ async def _task_watchdog():
                         continue
                 if task.status != STATUS_RUNNING or task_id in _active_loops:
                     continue
+                if not _should_kick_task_loop(task_id, task):
+                    continue
                 _recover_stale_waits(task)
                 _log(task, "info", "检测到任务停滞，自动恢复执行")
                 asyncio.create_task(_run_batch_task(task_id))
@@ -1714,6 +1874,7 @@ def start_background_tasks():
     loop = asyncio.get_running_loop()
     for task in _tasks.values():
         _recover_stale_downloading(task)
+        _repair_fatal_post_videos(task)
     resumed = _resume_running_tasks_on_startup(loop)
     if resumed:
         logging.getLogger(__name__).info("已自动恢复 %d 个运行中的任务", resumed)

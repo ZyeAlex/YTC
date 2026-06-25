@@ -199,9 +199,116 @@ body {
   font-size: 0.78rem;
 }
 
-.collection-row {
+.collection-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.collection-edit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.collection-edit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.collection-edit-label {
+  flex-shrink: 0;
+  width: 52px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.collection-edit-value {
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.collection-step {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.collection-step:last-child {
+  border-bottom: none;
+}
+
+.collection-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.collection-step-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collection-step-num {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.collection-step-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.collection-chips {
+  display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.collection-chips .empty-hint {
+  margin: 0;
+  padding: 4px 0;
+}
+
+.collection-step-actions {
+  background: var(--surface2);
+}
+
+.collection-action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.collection-action-bar .btn-primary {
+  min-width: 96px;
 }
 
 .collection-account-label select {
@@ -944,6 +1051,67 @@ body {
   opacity: 0.85;
 }
 
+.progress-failed-wrap {
+  margin-top: 12px;
+  flex-shrink: 0;
+}
+
+.progress-failed-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: #f8a0a0;
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.progress-failed-toggle:hover {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.progress-failed-chevron {
+  display: inline-block;
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 0.2s;
+  transform: rotate(90deg);
+}
+
+.progress-failed-toggle.expanded .progress-failed-chevron {
+  transform: rotate(-90deg);
+}
+
+.progress-failed-list {
+  margin-top: 10px;
+}
+
+.progress-failed-list .progress-card {
+  opacity: 0.88;
+}
+
+.progress-card-compact .progress-title {
+  font-size: 0.82rem;
+}
+
+.progress-card-compact .channel-tags {
+  margin-top: 4px;
+}
+
+.progress-card-compact .progress-msg {
+  font-size: 0.78rem;
+  color: var(--error);
+}
+
 .progress-card {
   padding: 14px 16px;
   background: var(--surface);
@@ -1190,6 +1358,15 @@ body {
   max-width: 960px;
 }
 
+.modal-task .dialog-col-source {
+  height: 100%;
+  min-height: 0;
+}
+
+.modal-task .dialog-video-list {
+  max-height: none;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -1256,7 +1433,7 @@ body {
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .dialog-col {
@@ -1267,7 +1444,12 @@ body {
 }
 
 .dialog-col-source {
-  min-height: 360px;
+  min-height: 0;
+}
+
+.dialog-col-source .panel-block-grow {
+  flex: 1;
+  min-height: 0;
 }
 
 .panel-block {
@@ -1281,7 +1463,7 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 200px;
+  min-height: 0;
 }
 
 .panel-block-head {
@@ -1523,7 +1705,7 @@ body {
 
 .dialog-video-list {
   flex: 1;
-  max-height: min(320px, 38vh);
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1701,6 +1883,10 @@ body {
 
 .check-item:hover { background: var(--surface2); }
 .check-item input { accent-color: var(--accent); }
+
+.dialog-option-check {
+  margin-bottom: 4px;
+}
 
 .account-groups { display: flex; flex-direction: column; gap: 10px; }
 

@@ -45,11 +45,15 @@ class DouyinLinksRequest(BaseModel):
 
 class DouyinCollectionRequest(BaseModel):
     cookie_index: int = Field(default=0, ge=0)
+    collects_id: str = ""
     cursor: int = Field(default=0, ge=0)
     count: int = Field(default=20, ge=1, le=20)
     fetch_all: bool = False
     max_items: int = Field(default=2000, ge=1, le=5000)
 
+
+class DouyinCollectsListRequest(BaseModel):
+    cookie_index: int = Field(default=0, ge=0)
 
 class TaskUpdateRequest(BaseModel):
     platform: str = Field(..., pattern="^(bili|douyin)$")
@@ -62,7 +66,9 @@ class TaskUpdateRequest(BaseModel):
     search_sort: str = Field(default="recent", pattern="^(default|recent)$")
     source: str = Field(default="search", pattern="^(search|collection|manual)$")
     douyin_cookie_index: int = Field(default=0, ge=0)
+    douyin_collects_id: str = ""
     collection_account_label: str = ""
+    include_topics: bool = True
 
 
 class TaskCreateRequest(BaseModel):
@@ -77,7 +83,9 @@ class TaskCreateRequest(BaseModel):
     search_sort: str = Field(default="recent", pattern="^(default|recent)$")
     source: str = Field(default="search", pattern="^(search|collection|manual)$")
     douyin_cookie_index: int = Field(default=0, ge=0)
+    douyin_collects_id: str = ""
     collection_account_label: str = ""
+    include_topics: bool = True
     auto_start: bool = False
 
 

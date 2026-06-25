@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/cron-picker.css?v=3" />
-  <link rel="stylesheet" href="/static/style.css?v=38" />
+  <link rel="stylesheet" href="/static/style.css?v=40" />
 </head>
 <body>
   <div id="loginOverlay" class="login-overlay">
@@ -105,6 +105,13 @@
                   <span class="progress-done-chevron" aria-hidden="true">›</span>
                 </button>
                 <div id="videoProgressDoneList" class="progress-list progress-done-list hidden"></div>
+              </div>
+              <div id="videoProgressFailedWrap" class="progress-failed-wrap hidden">
+                <button type="button" id="toggleFailedVideosBtn" class="progress-failed-toggle" aria-expanded="false">
+                  <span id="failedVideosToggleLabel">发送失败 0 条</span>
+                  <span class="progress-failed-chevron" aria-hidden="true">›</span>
+                </button>
+                <div id="videoProgressFailedList" class="progress-list progress-failed-list hidden"></div>
               </div>
             </div>
           </section>
@@ -297,15 +304,55 @@
               <div class="panel-block-head">
                 <h3>收藏夹</h3>
               </div>
-              <p class="panel-hint">选择抖音账号加载收藏；长期任务发完一批后会自动同步新收藏</p>
-              <div class="search-input-row collection-row">
-                <label class="bili-pages-label collection-account-label">
-                  <span>账号</span>
-                  <select id="dialogDouyinAccount"></select>
-                </label>
-                <button type="button" id="dialogCollectionBtn" class="btn btn-primary btn-sm">加载</button>
-                <button type="button" id="dialogCollectionMoreBtn" class="btn btn-secondary btn-sm hidden">更多</button>
-                <button type="button" id="dialogCollectionAllBtn" class="btn btn-secondary btn-sm">全部</button>
+              <p class="panel-hint" id="collectionSectionHint">按步骤选择账号与收藏夹，再加载视频列表</p>
+              <div class="collection-edit-info hidden" id="collectionEditInfo">
+                <div class="collection-edit-row">
+                  <span class="collection-edit-label">账号</span>
+                  <span class="collection-edit-value" id="collectionEditAccount"></span>
+                </div>
+                <div class="collection-edit-row">
+                  <span class="collection-edit-label">收藏夹</span>
+                  <span class="collection-edit-value" id="collectionEditFolder"></span>
+                </div>
+              </div>
+              <div class="collection-setup" id="collectionCreateFlow">
+                <div class="collection-step">
+                  <div class="collection-step-head">
+                    <div class="collection-step-title-wrap">
+                      <span class="collection-step-num">1</span>
+                      <span class="collection-step-title">账号</span>
+                    </div>
+                    <button type="button" id="dialogLoadDouyinAccountsBtn" class="btn btn-secondary btn-sm">加载账号</button>
+                  </div>
+                  <div id="dialogDouyinAccountBtns" class="collection-chips">
+                    <div class="empty-hint">点击「加载账号」</div>
+                  </div>
+                </div>
+                <div class="collection-step">
+                  <div class="collection-step-head">
+                    <div class="collection-step-title-wrap">
+                      <span class="collection-step-num">2</span>
+                      <span class="collection-step-title">指定收藏夹</span>
+                    </div>
+                    <button type="button" id="dialogLoadDouyinFoldersBtn" class="btn btn-secondary btn-sm">加载收藏夹</button>
+                  </div>
+                  <div id="dialogDouyinFolderBtns" class="collection-chips">
+                    <div class="empty-hint">先选账号，再点击「加载收藏夹」</div>
+                  </div>
+                </div>
+                <div class="collection-step collection-step-actions">
+                  <div class="collection-step-head">
+                    <div class="collection-step-title-wrap">
+                      <span class="collection-step-num">3</span>
+                      <span class="collection-step-title">加载视频</span>
+                    </div>
+                  </div>
+                  <div class="collection-action-bar">
+                    <button type="button" id="dialogCollectionBtn" class="btn btn-primary btn-sm">加载视频</button>
+                    <button type="button" id="dialogCollectionAllBtn" class="btn btn-secondary btn-sm">加载全部视频</button>
+                    <button type="button" id="dialogCollectionMoreBtn" class="btn btn-secondary btn-sm hidden">加载更多</button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -374,6 +421,17 @@
                   <div id="dialogBotAccounts" class="check-grid compact"></div>
                 </div>
               </div>
+            </div>
+
+            <div class="panel-block">
+              <div class="panel-block-head">
+                <h3>发布选项</h3>
+              </div>
+              <label class="check-item dialog-option-check">
+                <input type="checkbox" id="dialogIncludeTopics" checked />
+                <span>保留标题中的话题标签</span>
+              </label>
+              <p class="panel-hint panel-hint-inline">取消勾选将过滤标题里所有 # 话题</p>
             </div>
 
             <div class="panel-block">
@@ -504,6 +562,6 @@
   </div>
 
   <script src="/static/cron-picker.js?v=5"></script>
-  <script src="/static/app.js?v=76"></script>
+  <script src="/static/app.js?v=80"></script>
 </body>
 </html>
