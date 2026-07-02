@@ -6,23 +6,17 @@
 
 **后端（必需）**
 
+克隆后直接运行启动脚本即可（会自动安装 uv、Node.js、创建 `.venv`、安装 Python 依赖及 `tencent-channel-cli` 平台二进制）：
+
 **macOS / Linux**
 
 ```bash
-# 安装 uv（若未安装）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 首次启动会自动创建 .venv 并安装 Python 依赖
 ./start.sh
 ```
 
 **Windows**
 
-```powershell
-# 安装 uv（若未安装）
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# 首次启动会自动创建 .venv 并安装 Python 依赖
+```bat
 start.bat
 ```
 

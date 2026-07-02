@@ -13,6 +13,82 @@ Write-Host "========================================"
 Write-Host "  腾讯频道发帖工具"
 Write-Host "========================================"
 
+function Test-CommandExists($Name) {
+    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Ensure-Uv {
+    if (Test-CommandExists "uv") { return }
+    Write-Host "→ 未检测到 uv，正在安装..."
+    irm https://astral.sh/uv/install.ps1 | iex
+    $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
+    if (-not (Test-CommandExists "uv")) {
+        Write-Host "✗ uv 安装失败，请手动安装: https://docs.astral.sh/uv/"
+        exit 1
+    }
+}
+
+function Ensure-Node {
+    $NodeVersion = if ($env:NODE_VERSION) { $env:NODE_VERSION } else { "20.18.3" }
+    $ToolsNode = Join-Path $Root ".tools\node"
+    $nodeExe = Join-Path $ToolsNode "node.exe"
+
+    if (Test-Path $nodeExe) {
+        $env:PATH = "$ToolsNode;$env:PATH"
+    }
+    if ((Test-CommandExists "node") -and (Test-CommandExists "npm")) { return }
+
+    Write-Host "→ 未检测到 Node.js，正在安装到 .tools\node (v$NodeVersion)..."
+
+    $archive = "node-v$NodeVersion-win-x64"
+    $zipName = "$archive.zip"
+    $url = "https://nodejs.org/dist/v$NodeVersion/$zipName"
+    $tmpZip = Join-Path $env:TEMP $zipName
+    $toolsDir = Join-Path $Root ".tools"
+
+    Invoke-WebRequest -Uri $url -OutFile $tmpZip -UseBasicParsing
+    if (Test-Path $ToolsNode) { Remove-Item $ToolsNode -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    Expand-Archive -Path $tmpZip -DestinationPath $toolsDir -Force
+    Rename-Item (Join-Path $toolsDir $archive) $ToolsNode
+    Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
+
+    $env:PATH = "$ToolsNode;$env:PATH"
+    if (-not (Test-CommandExists "node") -or -not (Test-CommandExists "npm")) {
+        Write-Host "✗ Node.js 安装失败"
+        exit 1
+    }
+    Write-Host "✓ node $(node --version 2>$null)"
+}
+
+function Ensure-TencentCli {
+    $dir = Join-Path $Root "skills\tencent-channel-cli"
+    if (-not (Test-Path $dir)) { return }
+    if (-not (Test-CommandExists "node")) { return }
+    if (-not (Test-CommandExists "npm")) { return }
+
+    $pkg = "tencent-channel-cli-win32-x64"
+    $bin = Join-Path $dir "node_modules\$pkg\bin\tencent-channel-cli.exe"
+    if (Test-Path $bin) { return }
+
+    Write-Host "→ 安装 tencent-channel-cli ($pkg)..."
+    Push-Location $dir
+    try {
+        npm install --no-fund --no-audit --omit=dev -q 2>$null
+        if (-not (Test-Path $bin)) {
+            npm install $pkg --no-fund --no-audit -q 2>$null
+        }
+        if (-not (Test-Path $bin)) {
+            Write-Host "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行 npm install"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+Ensure-Uv
+Ensure-Node
+
 if (-not (Test-Path "$Root\.venv")) {
     Write-Host "→ 创建 uv 虚拟环境..."
     try {
@@ -27,11 +103,10 @@ if (Test-Path $ActivateScript) {
     . $ActivateScript
 }
 
-& uv pip install -q -r requirements.txt 2>$null
+Write-Host "→ 安装 Python 依赖..."
+& uv pip install -q -r requirements.txt
 
-function Test-CommandExists($Name) {
-    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
-}
+Ensure-TencentCli
 
 Write-Host "→ 检查工具..."
 

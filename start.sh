@@ -17,6 +17,115 @@ echo "========================================"
 echo "  腾讯频道发帖工具"
 echo "========================================"
 
+ensure_uv() {
+  if command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "→ 未检测到 uv，正在安装..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "✗ uv 安装失败，请手动安装: https://docs.astral.sh/uv/"
+    exit 1
+  fi
+}
+
+NODE_VERSION="${NODE_VERSION:-20.18.3}"
+TOOLS_NODE="$ROOT/.tools/node"
+
+prepend_node_path() {
+  if [ -d "$TOOLS_NODE/bin" ]; then
+    export PATH="$TOOLS_NODE/bin:$PATH"
+  fi
+}
+
+ensure_node() {
+  prepend_node_path
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "→ 未检测到 Node.js，正在安装到 .tools/node (v${NODE_VERSION})..."
+
+  local os arch ext archive url tmpdir
+  case "$(uname -s)" in
+    Darwin) os=darwin; ext=tar.gz ;;
+    Linux) os=linux; ext=tar.xz ;;
+    *)
+      echo "✗ 无法自动安装 Node.js，请手动安装: https://nodejs.org/"
+      exit 1
+      ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *)
+      echo "✗ 不支持的 CPU 架构: $(uname -m)"
+      exit 1
+      ;;
+  esac
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "✗ 需要 curl 以下载 Node.js"
+    exit 1
+  fi
+
+  archive="node-v${NODE_VERSION}-${os}-${arch}"
+  url="https://nodejs.org/dist/v${NODE_VERSION}/${archive}.${ext}"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  curl -fsSL "$url" -o "$tmpdir/node.${ext}"
+  mkdir -p "$ROOT/.tools"
+  rm -rf "$TOOLS_NODE"
+  if [ "$ext" = "tar.xz" ]; then
+    tar -xJf "$tmpdir/node.${ext}" -C "$ROOT/.tools"
+  else
+    tar -xzf "$tmpdir/node.${ext}" -C "$ROOT/.tools"
+  fi
+  mv "$ROOT/.tools/$archive" "$TOOLS_NODE"
+  export PATH="$TOOLS_NODE/bin:$PATH"
+
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "✗ Node.js 安装失败"
+    exit 1
+  fi
+  echo "✓ node $(node --version 2>/dev/null)"
+}
+
+ensure_tencent_cli() {
+  local dir="$ROOT/skills/tencent-channel-cli"
+  [ -d "$dir" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  command -v npm >/dev/null 2>&1 || return 0
+
+  local plat arch pkg bin
+  case "$(uname -s)" in
+    Darwin) plat=darwin ;;
+    Linux) plat=linux ;;
+    *) return 0 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *) return 0 ;;
+  esac
+
+  pkg="tencent-channel-cli-${plat}-${arch}"
+  bin="$dir/node_modules/$pkg/bin/tencent-channel-cli"
+  if [ -x "$bin" ]; then
+    return 0
+  fi
+
+  echo "→ 安装 tencent-channel-cli (${pkg})..."
+  (cd "$dir" && npm install --no-fund --no-audit --omit=dev -q) \
+    || (cd "$dir" && npm install "$pkg" --no-fund --no-audit -q) \
+    || echo "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行 npm install"
+}
+
+ensure_uv
+ensure_node
+
 # 未初始化则自动创建
 if [ ! -d "$ROOT/.venv" ]; then
   echo "→ 创建 uv 虚拟环境..."
@@ -27,8 +136,11 @@ fi
 # shellcheck disable=SC1091
 source "$ROOT/.venv/bin/activate"
 
-# 同步依赖（含 yt-dlp，优先用 .venv 内最新版）
-uv pip install -q -r requirements.txt 2>/dev/null || true
+# 同步依赖（含 yt-dlp、imageio-ffmpeg 等）
+echo "→ 安装 Python 依赖..."
+uv pip install -q -r requirements.txt
+
+ensure_tencent_cli
 
 check_cmd() {
   if command -v "$1" >/dev/null 2>&1; then

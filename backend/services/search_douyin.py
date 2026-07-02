@@ -6,7 +6,7 @@ import re
 import subprocess
 import time
 
-from backend.config import DOUYIN_SEARCH_JS, DOUYIN_SKILL_DIR
+from backend.config import DOUYIN_SEARCH_JS, NODE_PATH, DOUYIN_SKILL_DIR
 from backend.data.app_config import get_guaikei_token
 from backend.services.proxy_bypass import direct_connect_env
 
@@ -143,7 +143,7 @@ def search_douyin(keyword: str, sort: int = 2, limit: int = DOUYIN_API_LIMIT) ->
     if token_err:
         return {"error": token_err, "videos": []}
 
-    node = "/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else "node"
+    node = NODE_PATH
     cmd = [
         node, str(DOUYIN_SEARCH_JS),
         "--keyword", keyword,

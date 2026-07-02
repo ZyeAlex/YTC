@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +20,7 @@ SKILLS_DIR = ROOT / "skills"
 DOUYIN_SKILL_DIR = SKILLS_DIR / "douyin-search-keyword"
 DOUYIN_SEARCH_JS = DOUYIN_SKILL_DIR / "src" / "douyin" / "search-cli.js"
 LOCAL_TENCENT_CHANNEL_CLI = SKILLS_DIR / "tencent-channel-cli"
+LOCAL_NODE_DIR = ROOT / ".tools" / "node"
 
 
 def find_cli() -> str:
@@ -54,10 +56,49 @@ def find_cli_binary() -> str:
     return str(candidate)
 
 
+def find_node() -> str:
+    """优先项目内 .tools/node，其次系统 PATH。"""
+    explicit = os.environ.get("NODE_BIN")
+    if explicit and Path(explicit).exists():
+        return explicit
+
+    candidates: list[Path | str | None] = []
+    if sys.platform == "win32":
+        candidates.append(LOCAL_NODE_DIR / "node.exe")
+    else:
+        candidates.extend([
+            LOCAL_NODE_DIR / "bin" / "node",
+            Path("/opt/homebrew/bin/node"),
+            Path("/usr/local/bin/node"),
+        ])
+    candidates.append(shutil.which("node"))
+
+    for c in candidates:
+        if c and Path(c).exists():
+            return str(c)
+    return "node"
+
+
+def _venv_bin_dir() -> Path:
+    return ROOT / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+
+
+def build_path_env() -> str:
+    node_bin = str(LOCAL_NODE_DIR if sys.platform == "win32" else LOCAL_NODE_DIR / "bin")
+    parts = [
+        str(_venv_bin_dir()),
+        node_bin,
+        str(LOCAL_TENCENT_CHANNEL_CLI / "bin"),
+    ]
+    if sys.platform == "darwin":
+        parts.extend(["/opt/homebrew/bin", "/usr/local/bin"])
+    return os.pathsep.join(p for p in parts if p)
+
+
 def find_yt_dlp() -> str:
     candidates = [
         os.environ.get("YT_DLP"),
-        str(ROOT / ".venv" / "bin" / "yt-dlp"),
+        str(_venv_bin_dir() / ("yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")),
         "/opt/homebrew/bin/yt-dlp",
         "/usr/local/bin/yt-dlp",
         shutil.which("yt-dlp"),
@@ -87,11 +128,8 @@ def find_ffmpeg() -> str | None:
 
 CLI_PATH = find_cli()
 CLI_BINARY_PATH = find_cli_binary()
+NODE_PATH = find_node()
 YT_DLP_PATH = find_yt_dlp()
 FFMPEG_PATH = find_ffmpeg()
 
-PATH_ENV = (
-    f"{ROOT / '.venv' / 'bin'}:"
-    f"{LOCAL_TENCENT_CHANNEL_CLI / 'bin'}:"
-    "/opt/homebrew/bin:/usr/local/bin"
-)
+PATH_ENV = build_path_env()

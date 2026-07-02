@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.data.app_config import get_douyin_cookies
+from backend.config import NODE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -156,10 +157,7 @@ def _build_query(cookie: str | dict[str, str], extra: dict[str, str] | None = No
 
 
 def _node_bin() -> str:
-    for candidate in ("/usr/local/bin/node", shutil.which("node") or ""):
-        if candidate and os.path.isfile(candidate):
-            return candidate
-    return "node"
+    return NODE_PATH
 
 
 def _generate_abogus(query: str, body: str = "", *, sign_with_body: bool = True) -> str:
