@@ -315,6 +315,16 @@ def get_access_token() -> str:
     return str(load_config().get("access_token", "")).strip()
 
 
+def save_access_token(token: str) -> str:
+    cleaned = str(token or "").strip()
+
+    def _patch(cfg: dict[str, Any]) -> None:
+        cfg["access_token"] = cleaned
+
+    _mutate_config(_patch)
+    return cleaned
+
+
 def get_accounts_data() -> dict[str, Any]:
     accounts = load_config().get("accounts", {})
     if not isinstance(accounts, dict):

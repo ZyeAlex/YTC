@@ -8,15 +8,16 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/cron-picker.css?v=3" />
-  <link rel="stylesheet" href="/static/style.css?v=41" />
+  <link rel="stylesheet" href="/static/style.css?v=42" />
 </head>
 <body>
   <div id="loginOverlay" class="login-overlay">
     <div class="login-card">
       <div class="brand-icon login-brand">频</div>
       <h1>频道自动发帖点赞控制台</h1>
-      <p class="login-desc">请输入 Token</p>
+      <p id="loginDesc" class="login-desc">请输入 Token</p>
       <input type="password" id="loginToken" class="login-input" placeholder="请输入 Token" autocomplete="current-password" />
+      <p id="loginHint" class="login-hint hidden"></p>
       <p id="loginError" class="login-error hidden"></p>
       <button type="button" id="loginBtn" class="btn btn-primary login-btn">登录</button>
     </div>
@@ -584,6 +585,6 @@
   </div>
 
   <script src="/static/cron-picker.js?v=6"></script>
-  <script src="/static/app.js?v=81"></script>
+  <script src="/static/app.js?v=82"></script>
 </body>
 </html>

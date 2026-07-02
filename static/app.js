@@ -151,6 +151,7 @@ const settings = {
 
 const auth = {
   accessToken: null,
+  needsSetup: false,
 };
 
 const AUTO_LIKE_DEFAULTS = {
@@ -200,6 +201,7 @@ function clearAuthSession() {
 function showLoginOverlay(message = "") {
   $("#loginOverlay")?.classList.remove("hidden");
   $(".app-shell")?.classList.add("hidden");
+  updateLoginOverlayCopy();
   const errEl = $("#loginError");
   if (errEl) {
     if (message) {
@@ -210,6 +212,38 @@ function showLoginOverlay(message = "") {
       errEl.classList.add("hidden");
     }
   }
+}
+
+function updateLoginOverlayCopy() {
+  const desc = $("#loginDesc");
+  const hint = $("#loginHint");
+  const btn = $("#loginBtn");
+  const input = $("#loginToken");
+
+  if (auth.needsSetup) {
+    if (desc) desc.textContent = "首次使用，请设置登录 Token";
+    if (hint) {
+      hint.textContent = "将自动保存到 config.json，无需重启服务";
+      hint.classList.remove("hidden");
+    }
+    if (btn) btn.textContent = "保存并进入";
+    if (input) input.placeholder = "设置你的 Token";
+  } else {
+    if (desc) desc.textContent = "请输入 Token";
+    if (hint) {
+      hint.textContent = "";
+      hint.classList.add("hidden");
+    }
+    if (btn) btn.textContent = "登录";
+    if (input) input.placeholder = "请输入 Token";
+  }
+}
+
+async function fetchAuthStatus() {
+  const res = await fetch("/api/auth/status");
+  const data = await res.json().catch(() => ({}));
+  auth.needsSetup = !!data.needs_setup;
+  return data;
 }
 
 function hideLoginOverlay() {
@@ -299,6 +333,9 @@ async function apiPostStream(path, body, onEvent) {
 }
 
 async function ensureAuth() {
+  await fetchAuthStatus();
+  updateLoginOverlayCopy();
+
   const token = getAccessToken();
   if (!token) {
     showLoginOverlay();
@@ -321,7 +358,8 @@ async function loginWithToken(loginToken) {
     body: JSON.stringify({ token: loginToken.trim() }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(formatApiError(data.detail, "Token 无效"));
+  if (!res.ok) throw new Error(formatApiError(data.detail, auth.needsSetup ? "保存失败" : "Token 无效"));
+  if (data.initial_setup) auth.needsSetup = false;
   resetAppState();
   saveAuthSession(data);
   hideLoginOverlay();
@@ -333,7 +371,7 @@ async function handleLogin() {
   const errEl = $("#loginError");
   if (!token.trim()) {
     if (errEl) {
-      errEl.textContent = "请输入 Token";
+      errEl.textContent = auth.needsSetup ? "请设置 Token" : "请输入 Token";
       errEl.classList.remove("hidden");
     }
     return;

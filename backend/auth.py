@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from backend.data.app_config import get_access_token, init_storage
+from backend.data.app_config import get_access_token, init_storage, save_access_token
 
 
 def init_auth() -> None:
     init_storage()
+
+
+def is_token_configured() -> bool:
+    return bool(get_access_token())
 
 
 def verify_access_token(token: str | None) -> bool:
@@ -18,12 +22,26 @@ def verify_access_token(token: str | None) -> bool:
 
 def login_with_token(login_token: str) -> dict | None:
     raw = login_token.strip()
-    if not verify_access_token(raw):
+    if not raw:
+        return None
+
+    configured = get_access_token()
+    if not configured:
+        save_access_token(raw)
+        return {
+            "access_token": raw,
+            "token_type": "bearer",
+            "ok": True,
+            "initial_setup": True,
+        }
+
+    if raw != configured:
         return None
     return {
         "access_token": raw,
         "token_type": "bearer",
         "ok": True,
+        "initial_setup": False,
     }
 
 

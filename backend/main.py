@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.auth import init_auth, login_with_token, logout, verify_access_token
+from backend.auth import init_auth, is_token_configured, login_with_token, logout, verify_access_token
 from backend.auto_like_scheduler import (
     get_auto_like_status,
     run_channel_now,
@@ -98,9 +98,18 @@ app.add_middleware(
 )
 
 
+@app.get("/api/auth/status")
+def api_auth_status():
+    configured = is_token_configured()
+    return {"configured": configured, "needs_setup": not configured}
+
+
 @app.post("/api/auth/login")
 def api_login(req: LoginRequest):
-    result = login_with_token(req.token.strip())
+    token = req.token.strip()
+    if not token:
+        raise HTTPException(400, "请输入 Token")
+    result = login_with_token(token)
     if not result:
         raise HTTPException(401, "Token 无效")
     return result

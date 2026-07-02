@@ -31,7 +31,7 @@ start.bat
 
 | 字段 | 说明 |
 |------|------|
-| `access_token` | 登录 Token|
+| `access_token` | 登录 Token（首次打开页面可直接在登录框设置，会自动写入 config.json） |
 | `guaikei_api_token` | 抖音搜索guaikei Token（需要自动搜索时配置） |
 | `bili.cookies` | B站 Cookie 列表（设置页可配，搜索默认第一条） |
 | `douyin.cookies` | 抖音 Cookie 列表（设置页可配） |
