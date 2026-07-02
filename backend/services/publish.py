@@ -122,8 +122,16 @@ def publish_video(
     ]
     env, tmp_home = _cli_env(token)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-        output = result.stdout + result.stderr
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            env=env,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
         if result.returncode == 0 and ('"feed_id"' in output or '"id"' in output):
             return True, "", ""
         detail = _cli_error_detail(output)

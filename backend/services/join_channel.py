@@ -74,6 +74,17 @@ def _first_token() -> str:
     raise ValueError("没有可用账号 Token")
 
 
+def _cli_error_message(parsed: Any, fallback: str) -> str:
+    if not isinstance(parsed, dict):
+        return fallback
+    err = parsed.get("error")
+    if isinstance(err, dict):
+        msg = str(err.get("message") or err.get("hint") or "").strip()
+        if msg:
+            return msg[:200]
+    return fallback
+
+
 def get_share_info(token: str, url: str) -> dict[str, str]:
     _, output = run_cli(
         token,
@@ -82,7 +93,7 @@ def get_share_info(token: str, url: str) -> dict[str, str]:
     )
     parsed = _parse_json_output(output)
     if not isinstance(parsed, dict) or not parsed.get("success"):
-        raise ValueError("解析分享链接失败，请检查链接是否有效")
+        raise ValueError(_cli_error_message(parsed, "解析分享链接失败，请检查链接是否有效"))
 
     data = _cli_data(parsed)
     guild_id = str(data.get("guild_id") or "").strip()
