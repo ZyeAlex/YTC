@@ -1,4 +1,4 @@
-﻿# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
+﻿﻿# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -8,6 +8,17 @@ $HostAddr = if ($env:HOST) { $env:HOST } else { "0.0.0.0" }
 $Port = if ($env:PORT) { [int]$env:PORT } else { 8765 }
 
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
+
+$Script:PythonMirrors = @(
+    "https://registry.npmmirror.com/-/binary/python-build-standalone",
+    "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download"
+)
+
+function Set-ChinaMirrors {
+    if (-not $env:UV_PYTHON_PREFERENCE) { $env:UV_PYTHON_PREFERENCE = "only-managed" }
+    if (-not $env:UV_INDEX_URL) { $env:UV_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple/" }
+    if (-not $env:NPM_CONFIG_REGISTRY) { $env:NPM_CONFIG_REGISTRY = "https://registry.npmmirror.com" }
+}
 
 Write-Host "========================================"
 Write-Host "  腾讯频道发帖工具"
@@ -42,7 +53,7 @@ function Ensure-Node {
 
     $archive = "node-v$NodeVersion-win-x64"
     $zipName = "$archive.zip"
-    $url = "https://nodejs.org/dist/v$NodeVersion/$zipName"
+    $url = "https://npmmirror.com/mirrors/node/v$NodeVersion/$zipName"
     $tmpZip = Join-Path $env:TEMP $zipName
     $toolsDir = Join-Path $Root ".tools"
 
@@ -61,6 +72,59 @@ function Ensure-Node {
     Write-Host "✓ node $(node --version 2>$null)"
 }
 
+function Invoke-NativeQuiet {
+    param([scriptblock]$Command)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $old
+    }
+}
+
+function Test-VenvReady {
+    return Test-Path (Join-Path $Root ".venv\Scripts\Activate.ps1")
+}
+
+function Ensure-Venv {
+    if (Test-VenvReady) { return }
+
+    Write-Host "→ 创建 Python 虚拟环境（国内镜像）..."
+    $venvPath = Join-Path $Root ".venv"
+
+    foreach ($mirror in $Script:PythonMirrors) {
+        $env:UV_PYTHON_INSTALL_MIRROR = $mirror
+        Write-Host "  镜像: $mirror"
+        foreach ($pyVer in @("3.11", "3.12")) {
+            Write-Host "  下载 Python $pyVer ..."
+            Invoke-NativeQuiet { uv venv $venvPath --python $pyVer } | Out-Null
+            if (Test-VenvReady) {
+                Write-Host "✓ Python 虚拟环境已创建"
+                return
+            }
+        }
+    }
+
+    Write-Host "✗ 无法创建虚拟环境（已尝试国内镜像）"
+    exit 1
+}
+
+function Ensure-PythonDeps {
+    if (-not (Test-VenvReady)) {
+        Write-Host "✗ 虚拟环境不存在，无法安装 Python 依赖"
+        exit 1
+    }
+
+    Write-Host "→ 安装 Python 依赖（国内 PyPI 镜像）..."
+    Invoke-NativeQuiet { uv pip install -q -r requirements.txt } | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "✗ Python 依赖安装失败"
+        exit 1
+    }
+}
+
 function Ensure-TencentCli {
     $dir = Join-Path $Root "skills\tencent-channel-cli"
     if (-not (Test-Path $dir)) { return }
@@ -74,9 +138,9 @@ function Ensure-TencentCli {
     Write-Host "→ 安装 tencent-channel-cli ($pkg)..."
     Push-Location $dir
     try {
-        npm install --no-fund --no-audit --omit=dev -q 2>$null
+        Invoke-NativeQuiet { npm install --no-fund --no-audit --omit=dev -q } | Out-Null
         if (-not (Test-Path $bin)) {
-            npm install $pkg --no-fund --no-audit -q 2>$null
+            Invoke-NativeQuiet { npm install $pkg --no-fund --no-audit -q } | Out-Null
         }
         if (-not (Test-Path $bin)) {
             Write-Host "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行 npm install"
@@ -87,25 +151,16 @@ function Ensure-TencentCli {
 }
 
 Ensure-Uv
+Set-ChinaMirrors
 Ensure-Node
-
-if (-not (Test-Path "$Root\.venv")) {
-    Write-Host "→ 创建 uv 虚拟环境..."
-    try {
-        & uv venv "$Root\.venv" --python 3.11 2>$null
-    } catch {
-        & uv venv "$Root\.venv"
-    }
-}
+Ensure-Venv
 
 $ActivateScript = Join-Path $Root ".venv\Scripts\Activate.ps1"
 if (Test-Path $ActivateScript) {
     . $ActivateScript
 }
 
-Write-Host "→ 安装 Python 依赖..."
-& uv pip install -q -r requirements.txt
-
+Ensure-PythonDeps
 Ensure-TencentCli
 
 Write-Host "→ 检查工具..."

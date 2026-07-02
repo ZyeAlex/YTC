@@ -71,7 +71,7 @@ ensure_node() {
   fi
 
   archive="node-v${NODE_VERSION}-${os}-${arch}"
-  url="https://nodejs.org/dist/v${NODE_VERSION}/${archive}.${ext}"
+  url="https://npmmirror.com/mirrors/node/v${NODE_VERSION}/${archive}.${ext}"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' RETURN
 
@@ -91,6 +91,54 @@ ensure_node() {
     exit 1
   fi
   echo "✓ node $(node --version 2>/dev/null)"
+}
+
+setup_china_mirrors() {
+  export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-only-managed}"
+  export UV_INDEX_URL="${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+  export NPM_CONFIG_REGISTRY="${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}"
+}
+
+PYTHON_MIRRORS=(
+  "https://registry.npmmirror.com/-/binary/python-build-standalone"
+  "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download"
+)
+
+venv_ready() {
+  [ -f "$ROOT/.venv/bin/activate" ]
+}
+
+ensure_venv() {
+  if venv_ready; then
+    return 0
+  fi
+
+  echo "→ 创建 Python 虚拟环境（国内镜像）..."
+  local mirror ver
+  for mirror in "${PYTHON_MIRRORS[@]}"; do
+    export UV_PYTHON_INSTALL_MIRROR="$mirror"
+    echo "  镜像: $mirror"
+    for ver in 3.11 3.12; do
+      echo "  下载 Python ${ver} ..."
+      if uv venv "$ROOT/.venv" --python "$ver" && venv_ready; then
+        echo "✓ Python 虚拟环境已创建"
+        return 0
+      fi
+    done
+  done
+
+  echo "✗ 无法创建虚拟环境（已尝试国内镜像）"
+  exit 1
+}
+
+ensure_python_deps() {
+  if ! venv_ready; then
+    echo "✗ 虚拟环境不存在，无法安装 Python 依赖"
+    exit 1
+  fi
+
+  echo "→ 安装 Python 依赖（国内 PyPI 镜像）..."
+  uv pip install -q -r requirements.txt
 }
 
 ensure_tencent_cli() {
@@ -124,22 +172,15 @@ ensure_tencent_cli() {
 }
 
 ensure_uv
+setup_china_mirrors
 ensure_node
-
-# 未初始化则自动创建
-if [ ! -d "$ROOT/.venv" ]; then
-  echo "→ 创建 uv 虚拟环境..."
-  uv venv "$ROOT/.venv" --python 3.11 2>/dev/null || uv venv "$ROOT/.venv"
-fi
+ensure_venv
 
 # 激活 uv 虚拟环境
 # shellcheck disable=SC1091
 source "$ROOT/.venv/bin/activate"
 
-# 同步依赖（含 yt-dlp、imageio-ffmpeg 等）
-echo "→ 安装 Python 依赖..."
-uv pip install -q -r requirements.txt
-
+ensure_python_deps
 ensure_tencent_cli
 
 check_cmd() {

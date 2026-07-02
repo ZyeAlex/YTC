@@ -6,7 +6,7 @@
 
 **后端（必需）**
 
-克隆后直接运行启动脚本即可（会自动安装 uv、Node.js、创建 `.venv`、安装 Python 依赖及 `tencent-channel-cli` 平台二进制）：
+克隆后直接运行启动脚本即可（**无需预装 Python**；会自动通过国内镜像安装 uv、Node.js、Python 3.11、项目依赖及 `tencent-channel-cli`）：
 
 **macOS / Linux**
 
@@ -19,6 +19,11 @@
 ```bat
 start.bat
 ```
+
+国内镜像（已内置，无需手动配置）：
+- Python：`npmmirror.com` → `ghfast.top` 备用
+- PyPI：`mirrors.aliyun.com`
+- Node / npm：`npmmirror.com`
 
 ## 2. 配置
 

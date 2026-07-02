@@ -1,3 +1,10 @@
+[tool.uv]
+python-install-mirror = "https://registry.npmmirror.com/-/binary/python-build-standalone"
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+
 [project]
 name = "channel-poster"
 version = "1.0.0"
