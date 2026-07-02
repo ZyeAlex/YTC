@@ -1,4 +1,4 @@
-# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
+﻿# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
