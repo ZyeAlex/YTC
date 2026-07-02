@@ -6,12 +6,24 @@
 
 **后端（必需）**
 
+**macOS / Linux**
+
 ```bash
 # 安装 uv（若未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 首次启动会自动创建 .venv 并安装 Python 依赖
 ./start.sh
+```
+
+**Windows**
+
+```powershell
+# 安装 uv（若未安装）
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 首次启动会自动创建 .venv 并安装 Python 依赖
+start.bat
 ```
 
 ## 2. 配置
@@ -27,8 +39,22 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## 3. 启动
 
+**macOS / Linux**
+
 ```bash
 ./start.sh
+```
+
+**Windows**
+
+```bat
+start.bat
+```
+
+或在 PowerShell 中：
+
+```powershell
+.\start.ps1
 ```
 
 浏览器打开 http://127.0.0.1:8765（或服务器地址）
