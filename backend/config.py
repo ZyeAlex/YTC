@@ -41,8 +41,11 @@ def find_cli_binary() -> str:
 
     system = _pf.system().lower()
     machine = _pf.machine().lower()
-    plat = "darwin" if system == "darwin" else ("win32" if system == "windows" else system)
-    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    if system == "windows":
+        plat, arch = "win32", "x64"
+    else:
+        plat = "darwin" if system == "darwin" else system
+        arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
     pkg = f"tencent-channel-cli-{plat}-{arch}"
     bin_name = "tencent-channel-cli.exe" if plat == "win32" else "tencent-channel-cli"
 
@@ -83,13 +86,15 @@ def _venv_bin_dir() -> Path:
     return ROOT / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
 
 
-def build_path_env() -> str:
+def build_path_env(*, ffmpeg_path: str | None = None) -> str:
     node_bin = str(LOCAL_NODE_DIR if sys.platform == "win32" else LOCAL_NODE_DIR / "bin")
     parts = [
         str(_venv_bin_dir()),
         node_bin,
         str(LOCAL_TENCENT_CHANNEL_CLI / "bin"),
     ]
+    if ffmpeg_path:
+        parts.insert(1, str(Path(ffmpeg_path).parent))
     if sys.platform == "darwin":
         parts.extend(["/opt/homebrew/bin", "/usr/local/bin"])
     return os.pathsep.join(p for p in parts if p)
@@ -126,10 +131,52 @@ def find_ffmpeg() -> str | None:
     return which if which else None
 
 
+def _ensure_ffmpeg_shim(ffmpeg_path: str) -> str | None:
+    """在 .venv/bin(或 Scripts) 创建 ffmpeg，供 tencent-channel-cli 通过 PATH 查找。"""
+    src = Path(ffmpeg_path)
+    if not src.exists():
+        return None
+
+    shim_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    shim = _venv_bin_dir() / shim_name
+    if shim.exists():
+        try:
+            if shim.resolve() == src.resolve():
+                return str(shim)
+        except OSError:
+            pass
+        try:
+            shim.unlink()
+        except OSError:
+            return None
+
+    if sys.platform == "win32":
+        try:
+            shutil.copy2(src, shim)
+            return str(shim)
+        except OSError:
+            return None
+
+    try:
+        shim.symlink_to(src.resolve())
+        return str(shim)
+    except OSError:
+        pass
+
+    try:
+        shutil.copy2(src, shim)
+        if sys.platform != "win32":
+            shim.chmod(shim.stat().st_mode | 0o111)
+        return str(shim)
+    except OSError:
+        return None
+
+
 CLI_PATH = find_cli()
 CLI_BINARY_PATH = find_cli_binary()
 NODE_PATH = find_node()
 YT_DLP_PATH = find_yt_dlp()
 FFMPEG_PATH = find_ffmpeg()
+FFMPEG_CLI_PATH = _ensure_ffmpeg_shim(FFMPEG_PATH) if FFMPEG_PATH else None
 
-PATH_ENV = build_path_env()
+PATH_ENV = build_path_env(ffmpeg_path=FFMPEG_PATH)

@@ -10,4 +10,5 @@ config/config.json.bak
 config/users.json
 config/users/
 skills/douyin-search-keyword/logs/
+skills/tencent-channel-cli/node_modules/
 .DS_Store

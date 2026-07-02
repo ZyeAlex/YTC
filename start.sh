@@ -139,6 +139,8 @@ ensure_python_deps() {
 
   echo "→ 安装 Python 依赖（国内 PyPI 镜像）..."
   uv pip install -q -r requirements.txt
+  python -c "from backend.config import FFMPEG_CLI_PATH, FFMPEG_PATH; import sys; sys.exit(0 if (FFMPEG_CLI_PATH or FFMPEG_PATH) else 1)" \
+    || echo "⚠ imageio-ffmpeg 未就绪，视频发帖可能失败"
 }
 
 ensure_tencent_cli() {
@@ -166,9 +168,16 @@ ensure_tencent_cli() {
   fi
 
   echo "→ 安装 tencent-channel-cli (${pkg})..."
-  (cd "$dir" && npm install --no-fund --no-audit --omit=dev -q) \
-    || (cd "$dir" && npm install "$pkg" --no-fund --no-audit -q) \
-    || echo "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行 npm install"
+  if ! (cd "$dir" && npm install "$pkg@1.0.7" --no-fund --no-audit -q); then
+    if ! (cd "$dir" && npm install --no-fund --no-audit --omit=dev -q); then
+      echo "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行: npm install $pkg"
+      return 0
+    fi
+  fi
+
+  if [ ! -x "$bin" ]; then
+    echo "⚠ 未找到 ${pkg} 二进制，请手动在 skills/tencent-channel-cli 执行: npm install $pkg"
+  fi
 }
 
 ensure_uv
@@ -198,13 +207,30 @@ if [ -x "$YT_DLP_BIN" ]; then
 else
   check_cmd yt-dlp
 fi
-if python3 -c "from backend.config import FFMPEG_PATH; import sys; sys.exit(0 if FFMPEG_PATH else 1)" 2>/dev/null; then
-  echo "✓ ffmpeg $(python3 -c "from backend.config import FFMPEG_PATH; print(FFMPEG_PATH)" 2>/dev/null)"
+if [ -x "$ROOT/.venv/bin/ffmpeg" ]; then
+  echo "✓ ffmpeg $ROOT/.venv/bin/ffmpeg"
+elif python -c "from backend.config import FFMPEG_PATH; import sys; sys.exit(0 if FFMPEG_PATH else 1)" 2>/dev/null; then
+  echo "✓ ffmpeg $(python -c "from backend.config import FFMPEG_PATH; print(FFMPEG_PATH)" 2>/dev/null)"
 else
   echo "⚠ ffmpeg 未找到（请 uv pip install imageio-ffmpeg）"
 fi
-if [ -x "$ROOT/skills/tencent-channel-cli/bin/tencent-channel-cli" ]; then
-  echo "✓ tencent-channel-cli (skills/)"
+_tcli_bin=""
+case "$(uname -s)" in
+  Darwin|Linux)
+    case "$(uname -m)" in
+      x86_64|amd64) _tcli_arch=x64 ;;
+      arm64|aarch64) _tcli_arch=arm64 ;;
+    esac
+    if [ -n "${_tcli_arch:-}" ]; then
+      _tcli_plat=$([ "$(uname -s)" = Darwin ] && echo darwin || echo linux)
+      _tcli_bin="$ROOT/skills/tencent-channel-cli/node_modules/tencent-channel-cli-${_tcli_plat}-${_tcli_arch}/bin/tencent-channel-cli"
+    fi
+    ;;
+esac
+if [ -n "$_tcli_bin" ] && [ -x "$_tcli_bin" ]; then
+  echo "✓ tencent-channel-cli (${_tcli_plat}-${_tcli_arch})"
+elif [ -x "$ROOT/skills/tencent-channel-cli/bin/tencent-channel-cli" ]; then
+  echo "⚠ tencent-channel-cli wrapper 存在，但当前平台二进制未安装"
 else
   echo "⚠ skills/tencent-channel-cli 未找到"
 fi

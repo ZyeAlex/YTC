@@ -1,4 +1,4 @@
-﻿﻿# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
+﻿# 腾讯频道发帖 Web 工具 — 一键启动（Windows PowerShell）
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -123,6 +123,14 @@ function Ensure-PythonDeps {
         Write-Host "✗ Python 依赖安装失败"
         exit 1
     }
+    try {
+        python -c "from backend.config import FFMPEG_CLI_PATH, FFMPEG_PATH; import sys; sys.exit(0 if (FFMPEG_CLI_PATH or FFMPEG_PATH) else 1)" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "⚠ imageio-ffmpeg 未就绪，视频发帖可能失败"
+        }
+    } catch {
+        Write-Host "⚠ imageio-ffmpeg 未就绪，视频发帖可能失败"
+    }
 }
 
 function Ensure-TencentCli {
@@ -138,12 +146,12 @@ function Ensure-TencentCli {
     Write-Host "→ 安装 tencent-channel-cli ($pkg)..."
     Push-Location $dir
     try {
-        Invoke-NativeQuiet { npm install --no-fund --no-audit --omit=dev -q } | Out-Null
+        Invoke-NativeQuiet { npm install "${pkg}@1.0.7" --no-fund --no-audit -q } | Out-Null
         if (-not (Test-Path $bin)) {
-            Invoke-NativeQuiet { npm install $pkg --no-fund --no-audit -q } | Out-Null
+            Invoke-NativeQuiet { npm install --no-fund --no-audit --omit=dev -q } | Out-Null
         }
         if (-not (Test-Path $bin)) {
-            Write-Host "⚠ tencent-channel-cli 安装失败，请手动在 skills/tencent-channel-cli 执行 npm install"
+            Write-Host "⚠ 未找到 $pkg 二进制，请手动在 skills/tencent-channel-cli 执行: npm install $pkg"
         }
     } finally {
         Pop-Location
@@ -175,20 +183,28 @@ if (Test-Path $YtDlpBin) {
     Write-Host "⚠ yt-dlp 未安装"
 }
 
-try {
-    $ffmpegPath = python -c "from backend.config import FFMPEG_PATH; print(FFMPEG_PATH or '')" 2>$null
-    if ($ffmpegPath) {
-        Write-Host "✓ ffmpeg $ffmpegPath"
-    } else {
+$FfmpegShim = Join-Path $Root ".venv\Scripts\ffmpeg.exe"
+if (Test-Path $FfmpegShim) {
+    Write-Host "✓ ffmpeg $FfmpegShim"
+} else {
+    try {
+        $ffmpegPath = python -c "from backend.config import FFMPEG_PATH; print(FFMPEG_PATH or '')" 2>$null
+        if ($ffmpegPath) {
+            Write-Host "⚠ ffmpeg 已安装但未生成 .venv\Scripts\ffmpeg.exe，视频发帖可能失败"
+            Write-Host "  源文件: $ffmpegPath"
+        } else {
+            Write-Host "⚠ ffmpeg 未找到（请 uv pip install imageio-ffmpeg）"
+        }
+    } catch {
         Write-Host "⚠ ffmpeg 未找到（请 uv pip install imageio-ffmpeg）"
     }
-} catch {
-    Write-Host "⚠ ffmpeg 未找到（请 uv pip install imageio-ffmpeg）"
 }
 
-$CliWrapper = Join-Path $Root "skills\tencent-channel-cli\bin\tencent-channel-cli"
-if (Test-Path $CliWrapper) {
-    Write-Host "✓ tencent-channel-cli (skills/)"
+$CliBin = Join-Path $Root "skills\tencent-channel-cli\node_modules\tencent-channel-cli-win32-x64\bin\tencent-channel-cli.exe"
+if (Test-Path $CliBin) {
+    Write-Host "✓ tencent-channel-cli (win32-x64)"
+} elseif (Test-Path (Join-Path $Root "skills\tencent-channel-cli\bin\tencent-channel-cli")) {
+    Write-Host "⚠ tencent-channel-cli wrapper 存在，但 win32-x64 二进制未安装"
 } else {
     Write-Host "⚠ skills/tencent-channel-cli 未找到"
 }

@@ -9,7 +9,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from backend.config import CLI_BINARY_PATH, PATH_ENV
+from backend.config import CLI_BINARY_PATH, FFMPEG_CLI_PATH, FFMPEG_PATH, PATH_ENV
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ def make_cli_env(token: str) -> tuple[dict[str, str], str]:
     # 仅覆盖 HOME/凭证相关变量，避免读到 ~/.qqcli。
     env = os.environ.copy()
     env["PATH"] = PATH_ENV + os.pathsep + env.get("PATH", "")
+    ffmpeg_for_cli = FFMPEG_CLI_PATH or FFMPEG_PATH
+    if ffmpeg_for_cli:
+        env["FFMPEG_PATH"] = ffmpeg_for_cli
+        env["IMAGEIO_FFMPEG_EXE"] = ffmpeg_for_cli
     env["HOME"] = tmp_home
     env["QQ_AI_CONNECT_TOKEN"] = token
     env["QQ_AI_CONNECT_DOTENV"] = str(qqcli_dir / ".env")
