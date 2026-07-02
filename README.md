@@ -58,6 +58,26 @@ start.bat
 
 浏览器打开 http://127.0.0.1:8765（或服务器地址）
 
+## 4. Windows 便携版（免安装 exe）
+
+若不想折腾 Python / Node / ffmpeg 环境，可在 **Windows** 上打包成绿色便携版：
+
+```bat
+build_exe.bat
+```
+
+打包完成后，产物在 `dist\腾讯频道发帖工具\`：
+
+- 双击 **`腾讯频道发帖工具.exe`** 即可启动（会自动打开浏览器）
+- 将整个文件夹打成 zip 拷贝到其他 Windows 电脑，解压后同样可用
+- `config/`、`downloads/`、`cache/` 保存在 exe 同目录，升级时保留这些文件夹即可
+
+**说明：**
+
+- 打包必须在 Windows 上执行（PyInstaller 无法跨平台编译 exe）
+- 首次打包会自动下载 Node.js 与 `tencent-channel-cli-win32-x64`，体积约 300–500 MB
+- 关闭黑色命令行窗口即停止服务
+
 ## 作者
 
 子叶Alex

@@ -74,8 +74,7 @@ from backend.tasks import (
     stop_background_tasks,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
-STATIC_DIR = ROOT / "static"
+from backend.config import STATIC_DIR
 
 
 @asynccontextmanager

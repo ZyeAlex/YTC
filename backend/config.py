@@ -3,24 +3,57 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = ROOT / "config"
-TOOLS_DIR = ROOT / "backend" / "tools"
-DOUYIN_PARSER = TOOLS_DIR / "douyin_nocookie.py"
-DOWNLOAD_DIR = ROOT / "downloads"
-CACHE_DIR = ROOT / "cache"
-
 MAX_SIZE_MB = 200
 DOWNLOAD_TIMEOUT = 300
 PROBE_TIMEOUT = 90  # 元数据探测（含 B 站网页拉取重试）
 BILI_PROBE_ATTEMPTS = 3
 BILI_DOWNLOAD_ATTEMPTS = 3
 
-SKILLS_DIR = ROOT / "skills"
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _app_root() -> Path:
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _bundle_root() -> Path:
+    if is_frozen():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+    return _app_root()
+
+
+def _first_existing(*candidates: Path) -> Path:
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+ROOT = _app_root()
+BUNDLE_ROOT = _bundle_root()
+
+STATIC_DIR = _first_existing(BUNDLE_ROOT / "static", ROOT / "static")
+CONFIG_DIR = ROOT / "config"
+TOOLS_DIR = _first_existing(BUNDLE_ROOT / "backend" / "tools", ROOT / "backend" / "tools")
+DOUYIN_PARSER = TOOLS_DIR / "douyin_nocookie.py"
+DOWNLOAD_DIR = ROOT / "downloads"
+CACHE_DIR = ROOT / "cache"
+
+SKILLS_DIR = _first_existing(ROOT / "runtime" / "skills", BUNDLE_ROOT / "skills", ROOT / "skills")
 DOUYIN_SKILL_DIR = SKILLS_DIR / "douyin-search-keyword"
 DOUYIN_SEARCH_JS = DOUYIN_SKILL_DIR / "src" / "douyin" / "search-cli.js"
 LOCAL_TENCENT_CHANNEL_CLI = SKILLS_DIR / "tencent-channel-cli"
-LOCAL_NODE_DIR = ROOT / ".tools" / "node"
+LOCAL_NODE_DIR = _first_existing(
+    ROOT / "runtime" / "node",
+    ROOT / ".tools" / "node",
+    BUNDLE_ROOT / "runtime" / "node",
+)
 
 
 def find_cli() -> str:
@@ -60,7 +93,7 @@ def find_cli_binary() -> str:
 
 
 def find_node() -> str:
-    """优先项目内 .tools/node，其次系统 PATH。"""
+    """优先项目内 runtime/node 或 .tools/node，其次系统 PATH。"""
     explicit = os.environ.get("NODE_BIN")
     if explicit and Path(explicit).exists():
         return explicit
@@ -82,14 +115,18 @@ def find_node() -> str:
     return "node"
 
 
-def _venv_bin_dir() -> Path:
+def _tools_bin_dir() -> Path:
+    if is_frozen():
+        runtime_bin = ROOT / "runtime" / "bin"
+        runtime_bin.mkdir(parents=True, exist_ok=True)
+        return runtime_bin
     return ROOT / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
 
 
 def build_path_env(*, ffmpeg_path: str | None = None) -> str:
     node_bin = str(LOCAL_NODE_DIR if sys.platform == "win32" else LOCAL_NODE_DIR / "bin")
     parts = [
-        str(_venv_bin_dir()),
+        str(_tools_bin_dir()),
         node_bin,
         str(LOCAL_TENCENT_CHANNEL_CLI / "bin"),
     ]
@@ -100,10 +137,32 @@ def build_path_env(*, ffmpeg_path: str | None = None) -> str:
     return os.pathsep.join(p for p in parts if p)
 
 
+def _ensure_ytdlp_shim() -> None:
+    if not is_frozen():
+        return
+
+    bin_dir = _tools_bin_dir()
+    if sys.platform == "win32":
+        shim = bin_dir / "yt-dlp.cmd"
+        if shim.exists():
+            return
+        shim.write_text(f'@"{sys.executable}" -m yt_dlp %*\r\n', encoding="utf-8")
+        return
+
+    shim = bin_dir / "yt-dlp"
+    if shim.exists():
+        return
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m yt_dlp "$@"\n', encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | 0o111)
+
+
 def find_yt_dlp() -> str:
+    _ensure_ytdlp_shim()
+
     candidates = [
         os.environ.get("YT_DLP"),
-        str(_venv_bin_dir() / ("yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")),
+        str(_tools_bin_dir() / ("yt-dlp.cmd" if sys.platform == "win32" else "yt-dlp")),
+        str(_tools_bin_dir() / ("yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")),
         "/opt/homebrew/bin/yt-dlp",
         "/usr/local/bin/yt-dlp",
         shutil.which("yt-dlp"),
@@ -115,7 +174,7 @@ def find_yt_dlp() -> str:
 
 
 def find_ffmpeg() -> str | None:
-    """优先 .venv 内 imageio-ffmpeg 自带二进制，其次环境变量/系统 PATH。"""
+    """优先 imageio-ffmpeg 自带二进制，其次环境变量/系统 PATH。"""
     explicit = os.environ.get("FFMPEG_PATH") or os.environ.get("IMAGEIO_FFMPEG_EXE")
     if explicit and Path(explicit).exists():
         return explicit
@@ -132,13 +191,13 @@ def find_ffmpeg() -> str | None:
 
 
 def _ensure_ffmpeg_shim(ffmpeg_path: str) -> str | None:
-    """在 .venv/bin(或 Scripts) 创建 ffmpeg，供 tencent-channel-cli 通过 PATH 查找。"""
+    """在 runtime/bin 或 .venv 内创建 ffmpeg，供 tencent-channel-cli 通过 PATH 查找。"""
     src = Path(ffmpeg_path)
     if not src.exists():
         return None
 
     shim_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-    shim = _venv_bin_dir() / shim_name
+    shim = _tools_bin_dir() / shim_name
     if shim.exists():
         try:
             if shim.resolve() == src.resolve():
@@ -165,11 +224,32 @@ def _ensure_ffmpeg_shim(ffmpeg_path: str) -> str | None:
 
     try:
         shutil.copy2(src, shim)
-        if sys.platform != "win32":
-            shim.chmod(shim.stat().st_mode | 0o111)
+        shim.chmod(shim.stat().st_mode | 0o111)
         return str(shim)
     except OSError:
         return None
+
+
+def init_portable_dirs() -> None:
+    """便携版首次启动：创建可写目录并复制配置模板。"""
+    if not is_frozen():
+        return
+
+    for name in ("config", "downloads", "cache", "runtime/bin"):
+        (ROOT / name).mkdir(parents=True, exist_ok=True)
+
+    template_src = BUNDLE_ROOT / "config" / "config.template.json"
+    template_dst = CONFIG_DIR / "config.template.json"
+    if template_src.exists() and not template_dst.exists():
+        shutil.copy2(template_src, template_dst)
+
+    config_file = CONFIG_DIR / "config.json"
+    if not config_file.exists() and template_dst.exists():
+        shutil.copy2(template_dst, config_file)
+
+
+if is_frozen():
+    init_portable_dirs()
 
 
 CLI_PATH = find_cli()

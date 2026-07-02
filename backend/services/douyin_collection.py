@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.data.app_config import get_douyin_cookies
-from backend.config import NODE_PATH
+from backend.config import NODE_PATH, TOOLS_DIR
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ WEB_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 )
 _WINDOW_ENV = "1920|1080|1920|1080|0|30|0|0|1920|1080|1920|1080|1525|747|24|24|MacIntel"
-_ABOGUS_JS = Path(__file__).resolve().parent.parent / "tools" / "douyin_abogus.js"
+_ABOGUS_JS = TOOLS_DIR / "douyin_abogus.js"
 
 _BASE_QUERY = (
     "device_platform=webapp&aid=6383&channel=channel_pc_web"
