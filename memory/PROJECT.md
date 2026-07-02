@@ -24,6 +24,7 @@
 | 自动点赞 | ✅ | 独立任务文件，UI `/auto-like` |
 | 配置与任务分离 | ✅ | 见下文「数据分层」 |
 | 多账号隔离发帖 | ✅ | `cli_env.py` 每频道随机换号 |
+| 账号异常告警 | ✅ | 10023/890500 记录 + 侧栏 🔔 |
 | Cron 分钟选择器 | ✅ | 发帖默认 `0,20,40`；**点赞默认空**（不填则不定时） |
 
 **搬运前注意：** 无 Web 鉴权；`tencent-channel-cli` 当前 bundle 为 **darwin-arm64**，Linux 服务器需补对应二进制包。
@@ -53,6 +54,7 @@
 │   ├── data/
 │   │   ├── app_config.py               # config.json 读写（带锁 + 防清空）
 │   │   ├── auto_like_tasks.py          # cache/auto_like_tasks.json 读写
+│   │   ├── account_alerts.py           # cache/account_alerts.json 读写
 │   │   ├── accounts.py / channels.py / filter_patterns.py
 │   ├── services/
 │   │   ├── search_*.py / download.py / publish.py / video_filter.py
@@ -67,6 +69,7 @@
 ├── cache/
 │   ├── tasks.json                      # ★ 发帖任务状态
 │   ├── auto_like_tasks.json            # ★ 自动点赞任务状态
+│   └── account_alerts.json             # ★ 账号异常告警（10023/890500）
 │   └── bili_cookie_netscape.txt        # yt-dlp 运行时缓存
 └── .venv/
 ```
@@ -157,6 +160,7 @@ uv pip install -r requirements.txt
 | POST | `/api/search` | 搜索 |
 | POST | `/api/schedule/preview` | Cron 预览 |
 | GET/POST/PUT/DELETE | `/api/tasks`… | 任务 CRUD + 启停 + 单条发送 |
+| GET/DELETE | `/api/system-alerts` | 账号异常告警列表 / 清空 |
 
 ### 自动点赞
 
@@ -177,7 +181,9 @@ uv pip install -r requirements.txt
 - **once**：发完队列内全部视频
 - **recurring**：按关键词定时搜新视频并追加
 - Cron 仅分钟段，如 `9,29,49 * * * *`
-- 每条视频：**每频道随机换号**发帖；频道间隔 10~20s；20063 限流同频道换号最多 3 次
+- 每条视频：**每频道随机换号**发帖；频道间隔 10~20s
+- **换号重试**（每频道最多 3 次）：20063 限流、10023 无权限、890500 账号封禁
+- 10023 / 890500 写入 `cache/account_alerts.json`，侧栏 🔔 可查看
 - 持久化 `cache/tasks.json`，`running` 任务重启续跑
 
 ## 自动点赞任务
@@ -279,6 +285,6 @@ curl -s http://127.0.0.1:8765/api/settings/auto-like | python3 -c "import sys,js
 ## 发帖铁律
 
 1. 不降级：下载失败不发链接  
-2. 限流（20063）才换号重试  
+2. 限流（20063）、无权限（10023）、封禁（890500）换号重试（每频道最多 3 次）  
 3. 视频 >200MB 跳过  
 4. B站下载必须 Cookie  

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from backend.config import CACHE_DIR, DOWNLOAD_TIMEOUT, PROBE_TIMEOUT
+from backend.data.account_alerts import append_alert
 from backend.data.accounts import list_accounts_public
 from backend.schedule import (
     cron_from_legacy_interval,
@@ -33,6 +34,32 @@ from backend.services.video_order import (
 
 CHANNEL_INTERVAL_MIN = 10
 CHANNEL_INTERVAL_MAX = 20
+
+OLD_RATIO_PAUSE_12H = 0.30
+OLD_RATIO_PAUSE_24H = 0.70
+PAUSE_12H_SECONDS = 12 * 3600
+PAUSE_24H_SECONDS = 24 * 3600
+
+MAX_VIDEO_DOWNLOAD_FAILURES = 3
+DOWNLOAD_RETRY_COOLDOWN = 300
+STALE_DOWNLOAD_SECONDS = min(240, DOWNLOAD_TIMEOUT // 2)
+RETRYABLE_ERR_TYPES = frozenset({"rate_limit", "permission", "banned"})
+RETRY_REASON_LABEL = {
+    "rate_limit": "限流",
+    "permission": "无权限",
+    "banned": "账号封禁",
+}
+ALERT_ERR_CODES = {
+    "permission": 10023,
+    "banned": 890500,
+}
+
+
+@dataclass
+class FetchBatchResult:
+    added: int = 0
+    pause_until: float = 0.0
+    pause_reason: str = ""
 
 STATUS_CREATED = "created"
 STATUS_RUNNING = "running"
@@ -193,6 +220,8 @@ def _init_video_progress(videos: list[dict], channels: list[dict]) -> list[dict]
             "message": "",
             "started_at": "",
             "sent_at": "",
+            "download_failures": 0,
+            "download_retry_until": 0,
             "channels": [dict(c) for c in ch_tpl],
         }
         for v in videos
@@ -226,6 +255,11 @@ def _ensure_video_progress(task: TaskState):
 
 def _video_is_terminal(vp: dict) -> bool:
     return vp.get("status") in (VIDEO_DONE, VIDEO_SKIPPED)
+
+
+def _video_download_cooldown(vp: dict) -> bool:
+    until = float(vp.get("download_retry_until") or 0)
+    return until > time.time()
 
 
 def _video_auto_skip(vp: dict) -> bool:
@@ -336,32 +370,32 @@ def _prev_video_posted_successfully(task: TaskState, vi: int) -> bool:
 
 
 def _recover_stale_downloading(task: TaskState) -> bool:
-    """下载中状态超时（进程崩溃/网络卡住）时恢复为 pending。"""
-    stale_sec = min(180, DOWNLOAD_TIMEOUT // 2)  # 3 分钟无进展即恢复
+    """下载中状态超时（进程崩溃/协程丢失）时恢复为 pending；运行中的协程不干预。"""
+    if task.task_id in _active_loops:
+        return False
+    stale_sec = STALE_DOWNLOAD_SECONDS
     now = datetime.now()
     recovered = False
-    for vp in task.video_progress:
+    for vi, vp in enumerate(task.video_progress):
         if vp.get("status") != VIDEO_DOWNLOADING:
             continue
         started = vp.get("started_at", "")
+        stale = False
         if not started:
-            vp["status"] = VIDEO_PENDING
-            vp["message"] = "下载中断，继续执行"
-            recovered = True
+            stale = True
+        else:
+            try:
+                t = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
+                stale = (now - t).total_seconds() > stale_sec
+            except ValueError:
+                stale = True
+        if not stale:
             continue
-        try:
-            t = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            vp["status"] = VIDEO_PENDING
-            vp["message"] = "下载中断，继续执行"
-            recovered = True
-            continue
-        if (now - t).total_seconds() > stale_sec:
-            vp["status"] = VIDEO_PENDING
-            vp["message"] = "下载超时中断，继续执行"
-            recovered = True
+        recovered = True
+        vp["started_at"] = ""
+        _mark_download_skipped(task, vi, "下载超时", permanent=False)
     if recovered:
-        _log(task, "info", "已恢复卡住的「下载中」视频")
+        _log(task, "info", "检测到下载卡住，已重置并按重试策略处理")
         _persist_tasks()
     return recovered
 
@@ -398,17 +432,48 @@ def _recover_stale_waits(task: TaskState) -> bool:
 
 
 def _set_video(task: TaskState, vi: int, **kwargs):
-    if not _task_alive(task.task_id):
+    new_status = kwargs.get("status")
+    terminal = new_status in (VIDEO_DONE, VIDEO_FAILED, VIDEO_SKIPPED)
+    if not _task_alive(task.task_id) and not terminal:
         return
     if vi < 0 or vi >= len(task.video_progress):
         return
     entry = task.video_progress[vi]
-    new_status = kwargs.get("status")
     if new_status == VIDEO_DOWNLOADING:
         kwargs["started_at"] = _now_str()
     if new_status in (VIDEO_DONE, VIDEO_FAILED, VIDEO_SKIPPED):
         kwargs["sent_at"] = _now_str()
     entry.update(kwargs)
+    _persist_tasks()
+
+
+def _mark_download_skipped(task: TaskState, vi: int, err_msg: str, *, permanent: bool = False) -> None:
+    title = task.video_progress[vi].get("title", "")[:30]
+    msg = (err_msg or "下载失败")[:80]
+    if permanent:
+        _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {msg[:60]}")
+        _log(task, "warn", f"下载失败，已跳过 — {title}")
+        return
+    vp = task.video_progress[vi]
+    fails = int(vp.get("download_failures") or 0) + 1
+    vp["download_failures"] = fails
+    if fails >= MAX_VIDEO_DOWNLOAD_FAILURES:
+        _set_video(
+            task,
+            vi,
+            status=VIDEO_SKIPPED,
+            message=f"多次下载失败({fails})，已跳过: {msg[:40]}",
+        )
+        _log(task, "warn", f"多次下载失败，已跳过 — {title}")
+        return
+    vp["download_retry_until"] = time.time() + DOWNLOAD_RETRY_COOLDOWN
+    _set_video(
+        task,
+        vi,
+        status=VIDEO_PENDING,
+        message=f"下载失败({fails}/{MAX_VIDEO_DOWNLOAD_FAILURES})，{DOWNLOAD_RETRY_COOLDOWN // 60} 分钟后重试",
+    )
+    _log(task, "warn", f"下载失败({fails}/{MAX_VIDEO_DOWNLOAD_FAILURES}) — {title}")
     _persist_tasks()
 
 
@@ -1068,6 +1133,95 @@ def _is_recurring(task: TaskState) -> bool:
     return task.payload.get("task_type") == TASK_TYPE_RECURRING
 
 
+def _format_pause_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours} 小时" + (f" {minutes} 分" if minutes else "")
+    if seconds >= 60:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
+
+
+def _old_ratio_pause_seconds(ratio: float) -> int | None:
+    if ratio > OLD_RATIO_PAUSE_24H:
+        return PAUSE_24H_SECONDS
+    if ratio > OLD_RATIO_PAUSE_12H:
+        return PAUSE_12H_SECONDS
+    return None
+
+
+def _apply_recurring_pause(task: TaskState, seconds: int, reason: str) -> float:
+    until = _apply_task_pause(task, "fetch_pause_until", seconds, reason)
+    _apply_task_pause(task, "post_pause_until", seconds, reason)
+    return until
+
+
+def _apply_task_pause(task: TaskState, key: str, seconds: int, reason: str) -> float:
+    until = time.time() + max(0, int(seconds))
+    task.payload[key] = until
+    task.payload[f"{key}_reason"] = reason
+    _persist_tasks()
+    return until
+
+
+def _clear_task_pause(task: TaskState, key: str) -> None:
+    task.payload.pop(key, None)
+    task.payload.pop(f"{key}_reason", None)
+
+
+def _active_pause_until(task: TaskState, key: str) -> float:
+    return float(task.payload.get(key) or 0)
+
+
+def _in_recurring_pause(task: TaskState) -> bool:
+    now = time.time()
+    return (
+        _active_pause_until(task, "fetch_pause_until") > now
+        or _active_pause_until(task, "post_pause_until") > now
+    )
+
+
+async def _wait_task_pause(
+    task_id: str,
+    task: TaskState,
+    key: str,
+    label: str,
+) -> bool:
+    until = _active_pause_until(task, key)
+    now = time.time()
+    if until <= now:
+        if until > 0:
+            _clear_task_pause(task, key)
+            _persist_tasks()
+        return True
+    wait_sec = int(until - now)
+    _log(task, "info", f"{label}中，约 {_format_pause_duration(wait_sec)} 后继续...")
+    ok = await _interruptible_sleep(wait_sec, task_id, task)
+    if ok:
+        _clear_task_pause(task, key)
+        _persist_tasks()
+    return ok
+
+
+def _append_fetched_videos(task: TaskState, fresh: list[dict], channels: list[dict]) -> None:
+    payload = task.payload
+    if _is_collection_source(task):
+        _prepend_collection_videos(task, fresh)
+    elif sends_newest_last(
+        source=payload.get("source", SOURCE_SEARCH),
+        search_sort=payload.get("search_sort", "recent"),
+    ):
+        for v in reversed(fresh):
+            payload["videos"].insert(0, v)
+            task.video_progress.insert(0, _init_video_progress([v], channels)[0])
+    else:
+        for v in fresh:
+            payload["videos"].append(v)
+            task.video_progress.append(_init_video_progress([v], channels)[0])
+
+
 def _all_videos_terminal(task: TaskState) -> bool:
     if not task.video_progress:
         return False
@@ -1107,6 +1261,7 @@ def _should_kick_task_loop(task_id: str, task: TaskState) -> bool:
         _is_recurring(task)
         and _all_videos_terminal(task)
         and not _is_collection_source(task)
+        and not _in_recurring_pause(task)
     )
 
 
@@ -1136,9 +1291,9 @@ def _trim_video_history(task: TaskState, max_count: int = MAX_TASK_VIDEOS):
     _log(task, "info", f"视频列表已满，保留最新 {max_count} 条")
 
 
-async def _fetch_and_append_batch(task_id: str, task: TaskState) -> int:
+async def _fetch_and_append_batch(task_id: str, task: TaskState) -> FetchBatchResult:
     if not _task_alive(task_id):
-        return 0
+        return FetchBatchResult()
     payload = task.payload
     existing = _existing_video_ids(task)
 
@@ -1160,17 +1315,17 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> int:
         result = await asyncio.to_thread(_pull)
         if result.get("error") and not result.get("videos"):
             _log(task, "warn", f"同步收藏失败: {result['error']}")
-            return 0
+            return FetchBatchResult()
         fresh = result.get("videos") or []
         if not fresh:
             _log(task, "warn", "未找到新收藏视频")
-            return 0
+            return FetchBatchResult()
     else:
         platform = payload.get("platform", "")
         keyword = (payload.get("keyword") or task.keyword or "").strip()
         if not keyword:
             _log(task, "error", "长期任务缺少搜索关键词")
-            return 0
+            return FetchBatchResult()
 
         search_sort = payload.get("search_sort", "recent")
         bili_pages = max(1, min(int(payload.get("bili_pages") or 1), 10))
@@ -1179,33 +1334,68 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> int:
         )
         if search_result.get("error") and not search_result.get("videos"):
             _log(task, "warn", f"搜索失败: {search_result['error']}")
-            return 0
+            return FetchBatchResult()
 
         warning = search_result.get("warning")
         if warning:
             _log(task, "info", str(warning))
 
-        fresh = [v for v in search_result.get("videos", []) if v.get("id") not in existing]
-        if not fresh:
-            raw = search_result.get("raw_count", len(search_result.get("videos", [])))
-            filtered = search_result.get("filtered_count", 0)
-            _log(task, "warn", f"未找到新视频（拉取 {raw} 条，过滤 {filtered} 条）")
-            return 0
+        all_videos = search_result.get("videos", []) or []
+        raw_count = search_result.get("raw_count")
+        if raw_count is None:
+            raw_count = len(all_videos)
+        filtered = search_result.get("filtered_count", 0)
+
+        if raw_count == 0 and not all_videos:
+            until = _apply_recurring_pause(
+                task,
+                PAUSE_24H_SECONDS,
+                "fetch_empty",
+            )
+            _log(
+                task,
+                "warn",
+                f"未拉到任何视频，{_format_pause_duration(PAUSE_24H_SECONDS)} 后再搜索",
+            )
+            return FetchBatchResult(added=0, pause_until=until, pause_reason="fetch_empty")
+
+        fresh = [v for v in all_videos if v.get("id") not in existing]
+        total = len(all_videos)
+
+        if total == 0:
+            until = _apply_recurring_pause(task, PAUSE_24H_SECONDS, "no_new")
+            _log(
+                task,
+                "warn",
+                f"未找到新视频（拉取 {raw_count} 条，过滤 {filtered} 条），"
+                f"{_format_pause_duration(PAUSE_24H_SECONDS)} 后再搜索",
+            )
+            return FetchBatchResult(added=0, pause_until=until, pause_reason="no_new")
+
+        dup_count = total - len(fresh)
+        old_ratio = dup_count / total
+        pause_seconds = _old_ratio_pause_seconds(old_ratio)
+
+        if pause_seconds:
+            until = _apply_recurring_pause(task, pause_seconds, "old_ratio")
+            pause_label = _format_pause_duration(pause_seconds)
+            if not fresh:
+                _log(
+                    task,
+                    "warn",
+                    f"旧视频占比 {old_ratio:.0%}（{dup_count}/{total}），无新视频，"
+                    f"暂停 {pause_label} 后再搜索",
+                )
+                return FetchBatchResult(added=0, pause_until=until, pause_reason="old_ratio")
+            _log(
+                task,
+                "warn",
+                f"旧视频占比 {old_ratio:.0%}（{dup_count}/{total}），"
+                f"新增 {len(fresh)} 条，暂停 {pause_label} 后再发帖/搜索",
+            )
 
     channels = payload.get("channels", [])
-    if _is_collection_source(task):
-        _prepend_collection_videos(task, fresh)
-    elif sends_newest_last(
-        source=payload.get("source", SOURCE_SEARCH),
-        search_sort=payload.get("search_sort", "recent"),
-    ):
-        for v in reversed(fresh):
-            payload["videos"].insert(0, v)
-            task.video_progress.insert(0, _init_video_progress([v], channels)[0])
-    else:
-        for v in fresh:
-            payload["videos"].append(v)
-            task.video_progress.append(_init_video_progress([v], channels)[0])
+    _append_fetched_videos(task, fresh, channels)
 
     _trim_video_history(task)
     payload["batch_count"] = int(payload.get("batch_count", 0)) + 1
@@ -1215,7 +1405,12 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> int:
         task, "info",
         f"第 {payload['batch_count']} 批：新增 {len(fresh)} 条视频（累计 {task.video_count} 条）",
     )
-    return len(fresh)
+    pause_until = max(
+        _active_pause_until(task, "post_pause_until"),
+        _active_pause_until(task, "fetch_pause_until"),
+    )
+    reason = str(task.payload.get("post_pause_until_reason") or task.payload.get("fetch_pause_until_reason") or "")
+    return FetchBatchResult(added=len(fresh), pause_until=pause_until, pause_reason=reason)
 
 
 def _finalize_once_task(task: TaskState, all_posted: list[str], all_failed: list[str]):
@@ -1253,6 +1448,8 @@ async def _run_video_pass(
 
         vp = task.video_progress[vi]
         if _video_auto_skip(vp):
+            continue
+        if _video_download_cooldown(vp):
             continue
         if _video_all_channels_done(vp):
             _set_video(task, vi, status=VIDEO_DONE, message=vp.get("message") or "全部成功")
@@ -1374,6 +1571,10 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
         if _aborted(task_id):
             return
 
+        if recurring:
+            if not await _wait_task_pause(task_id, task, "post_pause_until", "发帖冷却"):
+                return
+
         stop_all = await _run_video_pass(task_id, task, all_posted, all_failed)
         if _aborted(task_id):
             return
@@ -1403,8 +1604,8 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
             return
 
         if _is_collection_source(task):
-            added = await _fetch_and_append_batch(task_id, task)
-            if added <= 0:
+            fetch_result = await _fetch_and_append_batch(task_id, task)
+            if fetch_result.added <= 0:
                 _log(
                     task,
                     "info",
@@ -1413,11 +1614,39 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
             return
 
         while not _aborted(task_id):
-            if await _fetch_and_append_batch(task_id, task) > 0:
-                break
-            _log(task, "info", "暂无新视频，60 秒后重新搜索...")
-            if not await _interruptible_sleep(60, task_id):
+            if not await _wait_task_pause(task_id, task, "fetch_pause_until", "拉取冷却"):
                 return
+            fetch_result = await _fetch_and_append_batch(task_id, task)
+            if fetch_result.added > 0:
+                break
+            if fetch_result.pause_until > time.time():
+                continue
+            break
+
+
+def _record_account_alert(
+    err_type: str,
+    account_id: str,
+    ch: dict,
+    detail: str,
+    task_id: str,
+) -> None:
+    code = ALERT_ERR_CODES.get(err_type)
+    if not code:
+        return
+    try:
+        append_alert(
+            error_code=code,
+            account_id=account_id,
+            account_label=account_label(account_id),
+            guild_id=str(ch.get("guild_id") or ""),
+            channel_id=str(ch.get("channel_id") or ""),
+            channel_name=str(ch.get("name") or ""),
+            message=detail,
+            task_id=task_id,
+        )
+    except Exception:
+        pass
 
 
 async def _post_to_channels(
@@ -1463,9 +1692,13 @@ async def _post_to_channels(
             posted.append(ch_name)
             _set_channel(task, vi, i, CH_DONE)
             _log(task, "success", f"✅ {ch_name}")
-        elif err_type == "rate_limit":
-            _log(task, "warn", f"⚠️ {ch_name} 限流，换号重试...")
+        elif err_type in RETRYABLE_ERR_TYPES:
+            if err_type in ALERT_ERR_CODES:
+                _record_account_alert(err_type, account_id, ch, err_detail, task.task_id)
+            reason = RETRY_REASON_LABEL.get(err_type, err_type)
+            _log(task, "warn", f"⚠️ {ch_name} {reason}，换号重试...")
             retry_ok = False
+            err_detail2 = err_detail
             for attempt in range(1, 4):
                 if _aborted(task.task_id):
                     return posted, failed, True
@@ -1474,7 +1707,7 @@ async def _post_to_channels(
                 others = [a for a in account_ids if a != account_id] or account_ids
                 retry_account = pick_random_account(others)
                 retry_label = account_label(retry_account)
-                ok2, _, err_detail2 = await asyncio.to_thread(
+                ok2, err_type2, err_detail2 = await asyncio.to_thread(
                     publish_video,
                     guild_id,
                     channel_id,
@@ -1489,15 +1722,13 @@ async def _post_to_channels(
                     _log(task, "success", f"✅ {ch_name} 第{attempt}次换号成功（{retry_label}）")
                     retry_ok = True
                     break
+                if err_type2 in ALERT_ERR_CODES:
+                    _record_account_alert(err_type2, retry_account, ch, err_detail2, task.task_id)
                 account_id = retry_account
             if not retry_ok:
                 failed.append(ch_name)
-                _set_channel(task, vi, i, CH_FAILED, error=err_detail2 or "限流换号失败")
+                _set_channel(task, vi, i, CH_FAILED, error=err_detail2 or f"{reason}换号失败")
                 _log(task, "error", f"❌ {ch_name} 换号3次仍失败")
-        elif err_type == "permission":
-            failed.append(ch_name)
-            _set_channel(task, vi, i, CH_FAILED, error=err_detail)
-            _log(task, "warn", f"⚠️ {ch_name} 无权限{f'：{err_detail}' if err_detail else ''}")
         elif err_type == "content_rejected":
             failed.append(ch_name)
             _set_channel(task, vi, i, CH_FAILED, error=err_detail)
@@ -1586,6 +1817,8 @@ def _prepare_video_manual_send(task: TaskState, vi: int):
         vp["message"] = "手动重试"
         vp["started_at"] = ""
         vp["sent_at"] = ""
+        vp["download_failures"] = 0
+        vp["download_retry_until"] = 0
         vp.pop("wait_until", None)
         for ch in vp.get("channels", []):
             ch["status"] = CH_PENDING
@@ -1687,6 +1920,8 @@ async def _process_one_video(
         vp = task.video_progress[vi]
         if not manual_retry and _video_auto_skip(vp):
             return [], [], False
+        if not manual_retry and _video_download_cooldown(vp):
+            return [], [], False
         if _video_is_terminal(vp):
             return [], [], False
         if _video_all_channels_done(vp):
@@ -1727,11 +1962,10 @@ async def _process_one_video(
             ok, err, skip = False, str(e)[:120], False
             _log(task, "error", f"下载异常 — {title[:30]}: {e}")
 
-        if task.video_progress[vi].get("status") == VIDEO_DOWNLOADING:
-            # 兜底：任何未更新状态的情况不留在「下载中」
+        downloading = task.video_progress[vi].get("status") == VIDEO_DOWNLOADING
+        if downloading or not ok:
             if skip or should_skip_download(err or ""):
-                _set_video(task, vi, status=VIDEO_SKIPPED, message=(err or "跳过")[:80])
-                _log(task, "warn", f"跳过 — {err or '永久跳过'} — {title[:30]}")
+                _mark_download_skipped(task, vi, err or "永久跳过", permanent=True)
                 return [], [], False
             if not ok:
                 err_msg = err or "下载失败"
@@ -1741,16 +1975,14 @@ async def _process_one_video(
                     _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}")
                     _persist_tasks()
                     return [], [], True
-                _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {err_msg[:60]}")
-                _log(task, "warn", f"下载失败，已跳过 — {title[:30]}")
+                _mark_download_skipped(task, vi, err_msg, permanent=False)
                 return [], [], False
 
         if _aborted(task_id):
             return [], [], True
 
         if skip or should_skip_download(err or ""):
-            _set_video(task, vi, status=VIDEO_SKIPPED, message=(err or "跳过")[:80])
-            _log(task, "warn", f"跳过 — {err or '永久跳过'} — {title[:30]}")
+            _mark_download_skipped(task, vi, err or "永久跳过", permanent=True)
             return [], [], False
 
         if not ok or not os.path.exists(output_path):
@@ -1761,9 +1993,11 @@ async def _process_one_video(
                 _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}: {err_msg[:60]}")
                 _persist_tasks()
                 return [], [], True
-            _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {err_msg[:60]}")
-            _log(task, "warn", f"下载失败，已跳过 — {title[:30]}")
+            _mark_download_skipped(task, vi, err_msg, permanent=False)
             return [], [], False
+
+        task.video_progress[vi]["download_failures"] = 0
+        task.video_progress[vi]["download_retry_until"] = 0
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
 
@@ -1823,11 +2057,7 @@ async def _task_watchdog():
         try:
             await asyncio.sleep(30)
             for task_id, task in list(_tasks.items()):
-                if _recover_stale_downloading(task):
-                    if task_id in _active_loops:
-                        _cancelled.add(task_id)
-                        _log(task, "warn", "检测到下载卡住，强制中断并重置")
-                        continue
+                _recover_stale_downloading(task)
                 if task.status != STATUS_RUNNING or task_id in _active_loops:
                     continue
                 if not _should_kick_task_loop(task_id, task):

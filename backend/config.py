@@ -11,7 +11,9 @@ CACHE_DIR = ROOT / "cache"
 
 MAX_SIZE_MB = 200
 DOWNLOAD_TIMEOUT = 300
-PROBE_TIMEOUT = 15  # 元数据探测超时，避免卡住「下载中」
+PROBE_TIMEOUT = 90  # 元数据探测（含 B 站网页拉取重试）
+BILI_PROBE_ATTEMPTS = 3
+BILI_DOWNLOAD_ATTEMPTS = 3
 
 SKILLS_DIR = ROOT / "skills"
 DOUYIN_SKILL_DIR = SKILLS_DIR / "douyin-search-keyword"

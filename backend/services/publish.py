@@ -105,7 +105,7 @@ def publish_video(
     """
     发布视频到腾讯频道
     返回 (success, error_type, detail):
-    error_type 为 "" | "rate_limit" | "oidb_limit" | "permission" | "other"
+    error_type 为 "" | "rate_limit" | "oidb_limit" | "permission" | "banned" | "other"
     """
     token = get_token(account_id)
     if not token:
@@ -133,6 +133,8 @@ def publish_video(
             return False, "oidb_limit", detail
         if "错误码 10023" in output or '"code":10023' in output:
             return False, "permission", detail
+        if "错误码 890500" in output or '"code":890500' in output:
+            return False, "banned", detail
         if '"code":10000' in output or "错误码 10000" in output:
             return False, "content_rejected", detail
         return False, "other", detail

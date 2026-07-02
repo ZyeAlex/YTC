@@ -8,9 +8,12 @@ import time
 
 from backend.config import DOUYIN_SEARCH_JS, DOUYIN_SKILL_DIR
 from backend.data.app_config import get_guaikei_token
+from backend.services.proxy_bypass import direct_connect_env
 
 # guaikei API 单次实际最多约 20 条（日志中从未成功超过 20）
 DOUYIN_API_LIMIT = 20
+DOUYIN_SEARCH_TIMEOUT = 120
+_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def _strip_ansi(s: str) -> str:
@@ -114,6 +117,15 @@ def _load_log_results(path: str) -> list[dict]:
     return items if isinstance(items, list) else []
 
 
+def _validate_guaikei_token(token: str) -> str | None:
+    token = (token or "").strip()
+    if not token:
+        return "GUAIKEI API Token 未配置，请在 config/config.json 填写 guaikei_api_token"
+    if not _TOKEN_RE.match(token):
+        return "GUAIKEI API Token 格式无效（应为 32 位十六进制）"
+    return None
+
+
 def search_douyin(keyword: str, sort: int = 2, limit: int = DOUYIN_API_LIMIT) -> dict:
     """
     sort: 0=综合, 1=最多点赞, 2=最新发布
@@ -126,6 +138,11 @@ def search_douyin(keyword: str, sort: int = 2, limit: int = DOUYIN_API_LIMIT) ->
             "videos": [],
         }
 
+    token = get_guaikei_token()
+    token_err = _validate_guaikei_token(token)
+    if token_err:
+        return {"error": token_err, "videos": []}
+
     node = "/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else "node"
     cmd = [
         node, str(DOUYIN_SEARCH_JS),
@@ -135,14 +152,17 @@ def search_douyin(keyword: str, sort: int = 2, limit: int = DOUYIN_API_LIMIT) ->
         "--limit", str(limit),
         "--output", "json",
     ]
-    env = os.environ.copy()
-    env["GUAIKEI_API_TOKEN"] = get_guaikei_token()
+    env = direct_connect_env()
+    env["GUAIKEI_API_TOKEN"] = token
 
     started_at = time.time()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOUYIN_SEARCH_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
-        return {"error": "抖音搜索超时", "videos": []}
+        return {
+            "error": f"抖音搜索超时（超过 {DOUYIN_SEARCH_TIMEOUT} 秒），请检查 GUAIKEI Token 或稍后重试",
+            "videos": [],
+        }
     except Exception as e:
         return {"error": str(e), "videos": []}
 

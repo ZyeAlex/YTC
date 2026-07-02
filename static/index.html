@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/cron-picker.css?v=3" />
-  <link rel="stylesheet" href="/static/style.css?v=40" />
+  <link rel="stylesheet" href="/static/style.css?v=41" />
 </head>
 <body>
   <div id="loginOverlay" class="login-overlay">
@@ -45,6 +45,11 @@
         <button type="button" id="sidebarNavAutoLike" class="sidebar-nav-btn" title="自动点赞">
           <span class="nav-icon" aria-hidden="true">👍</span>
           <span>点赞</span>
+        </button>
+        <button type="button" id="sidebarNavAlerts" class="sidebar-nav-btn sidebar-nav-alerts" title="系统告警">
+          <span class="nav-icon nav-icon-bell" aria-hidden="true">🔔</span>
+          <span>告警</span>
+          <span id="sidebarAlertsBadge" class="sidebar-alerts-badge hidden">0</span>
         </button>
         <button type="button" id="sidebarNavSettings" class="sidebar-nav-btn" title="设置">
           <span class="nav-icon" aria-hidden="true">⚙</span>
@@ -176,6 +181,23 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <div id="systemAlertsView" class="system-alerts-view page-view hidden">
+        <header class="detail-header">
+          <div class="detail-title-block">
+            <h1>系统告警</h1>
+            <p class="page-subtitle">账号无权限（10023）或被封禁（890500）时自动记录</p>
+          </div>
+          <div class="detail-actions">
+            <button type="button" id="clearSystemAlertsBtn" class="btn btn-secondary btn-sm">清空记录</button>
+          </div>
+        </header>
+        <section class="content-panel system-alerts-panel">
+          <div id="systemAlertsList" class="system-alerts-list">
+            <div class="empty-hint">暂无告警</div>
+          </div>
+        </section>
       </div>
 
       <div id="settingsView" class="settings-view page-view hidden">
@@ -562,6 +584,6 @@
   </div>
 
   <script src="/static/cron-picker.js?v=6"></script>
-  <script src="/static/app.js?v=80"></script>
+  <script src="/static/app.js?v=81"></script>
 </body>
 </html>

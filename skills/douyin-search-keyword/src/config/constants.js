@@ -11,7 +11,7 @@ module.exports = {
   /**
    * 请求超时时间 (毫秒)
    */
-  REQUEST_TIMEOUT: 20000,
+  REQUEST_TIMEOUT: 15000,
 
   /**
    * 创建任务最大重试次数
@@ -19,9 +19,19 @@ module.exports = {
   CREATE_MAX_ATTEMPTS: 3,
 
   /**
-   * 查询任务最大重试次数
+   * 查询任务最大重试次数（单次请求，非轮询）
    */
-  QUERY_MAX_ATTEMPTS: 60,
+  QUERY_MAX_ATTEMPTS: 3,
+
+  /**
+   * 搜索任务轮询次数
+   */
+  POLL_MAX_ATTEMPTS: 40,
+
+  /**
+   * 搜索任务轮询间隔 (毫秒)
+   */
+  POLL_INTERVAL: 2000,
 
   /**
    * 重试间隔时间 (毫秒)

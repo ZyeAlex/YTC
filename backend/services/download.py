@@ -3,11 +3,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import random
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from backend.config import (
+    BILI_DOWNLOAD_ATTEMPTS,
+    BILI_PROBE_ATTEMPTS,
     CACHE_DIR,
     DOUYIN_PARSER,
     DOWNLOAD_DIR,
@@ -83,9 +87,35 @@ def _parse_ytdlp_error(stderr: str, stdout: str, *, has_cookie: bool) -> str:
         return "代理拒绝连接 B站 (HTTP 403)，请关闭 VPN/系统代理后重试"
     if "Requested format is not available" in text:
         return "视频格式不可用，将尝试其他清晰度"
+    if _is_transient_download_error(text):
+        return "连接 B 站超时"
     if not text:
         return "下载失败"
     return text[:400]
+
+
+def _is_transient_download_error(err: str) -> bool:
+    text = (err or "").lower()
+    return any(
+        kw in text
+        for kw in (
+            "timed out",
+            "timeout",
+            "handshake",
+            "connection reset",
+            "connection refused",
+            "incomplete read",
+            "transport error",
+            "unable to download webpage",
+            "urlopen error",
+            "curl: (28)",
+            "curl: (35)",
+            "ssl",
+            "read operation timed out",
+            "超时",
+            "连接 b 站超时",
+        )
+    )
 
 
 def _load_douyin_parser(cookie: str = ""):
@@ -130,13 +160,24 @@ def _fmt_bytes(fmt: dict) -> int | None:
     return int(size) if size else None
 
 
+def _bili_network_args() -> list[str]:
+    return [
+        "--proxy", "",
+        "--socket-timeout", "60",
+        "--retries", "8",
+        "--extractor-retries", "5",
+        "--fragment-retries", "8",
+        "--retry-sleep", "linear=2::3",
+        "--impersonate", "Chrome-133:Macos-15",
+    ]
+
+
 def _bili_base_cmd(url: str, cookie: Path | None) -> list[str]:
     cmd = [
         YT_DLP_PATH,
         "--no-update",
         "--no-playlist",
-        "--proxy", "",
-        "--socket-timeout", "30",
+        *_bili_network_args(),
         url,
     ]
     if FFMPEG_PATH:
@@ -175,18 +216,27 @@ def _run_ytdlp(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
 
 def _probe_bili_info(url: str, cookie: Path | None) -> tuple[dict | None, str]:
     cmd = [*_bili_base_cmd(url, cookie), "-J", "--no-download"]
-    try:
-        result = _run_ytdlp(cmd, PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return None, "获取视频信息超时"
-    except Exception as e:
-        return None, str(e)
-    if result.returncode != 0:
-        return None, _parse_ytdlp_error(result.stderr, result.stdout, has_cookie=cookie is not None)
-    try:
-        return json.loads(result.stdout), ""
-    except json.JSONDecodeError:
-        return None, "解析视频信息失败"
+    last_err = ""
+    for attempt in range(BILI_PROBE_ATTEMPTS):
+        try:
+            result = _run_ytdlp(cmd, PROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            last_err = "获取视频信息超时"
+        except Exception as e:
+            last_err = str(e)
+        else:
+            if result.returncode == 0:
+                try:
+                    return json.loads(result.stdout), ""
+                except json.JSONDecodeError:
+                    last_err = "解析视频信息失败"
+            else:
+                last_err = _parse_ytdlp_error(result.stderr, result.stdout, has_cookie=cookie is not None)
+        if not _is_transient_download_error(last_err):
+            break
+        if attempt + 1 < BILI_PROBE_ATTEMPTS:
+            time.sleep((attempt + 1) * 2 + random.uniform(0, 1))
+    return None, last_err
 
 
 def _pick_bili_format(info: dict) -> tuple[str | None, str, bool]:
@@ -276,15 +326,39 @@ def download_bili(bvid: str, output_path: str) -> tuple[bool, str, bool]:
     url = f"https://www.bilibili.com/video/{bvid}"
     last_err = ""
     last_skip = False
-    for attempt in range(2):
+
+    for header in _bili_cookie_candidates():
+        api_ok, api_err, api_skip = _download_bili_via_api(bvid, output_path, header)
+        if api_ok:
+            return True, "", False
+        if api_skip:
+            return False, api_err, True
+        if api_err:
+            last_err = api_err
+
+    for attempt in range(BILI_DOWNLOAD_ATTEMPTS):
         ok, err, skip = _download_bili_once(bvid, url, output_path)
         if ok:
             return True, "", False
         last_err = err
         last_skip = skip
-        if not is_proxy_error(err) or attempt > 0:
+        if skip:
             break
-    return False, last_err, last_skip
+        if not _is_transient_download_error(err) and not is_proxy_error(err):
+            break
+        if attempt + 1 < BILI_DOWNLOAD_ATTEMPTS:
+            time.sleep((attempt + 1) * 3 + random.uniform(0, 1.5))
+    if last_skip:
+        return False, last_err, True
+    if _is_transient_download_error(last_err):
+        return False, f"{last_err}（网络连接 B 站不稳定，请稍后重试）", False
+    return False, last_err or "所有下载策略均失败", last_skip
+
+
+def _download_bili_via_api(bvid: str, output_path: str, cookie_header: str) -> tuple[bool, str, bool]:
+    from backend.services.bili_api_download import download_bili_via_api
+
+    return download_bili_via_api(bvid, output_path, cookie_header)
 
 
 def _download_bili_once(bvid: str, url: str, output_path: str) -> tuple[bool, str, bool]:
@@ -362,6 +436,8 @@ def _download_bili_once(bvid: str, url: str, output_path: str) -> tuple[bool, st
                 break
             if is_proxy_error(last_err):
                 return False, last_err, False
+            if _is_transient_download_error(last_err) or _is_transient_download_error(combined):
+                break
 
         if oversize_err:
             return False, oversize_err, True

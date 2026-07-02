@@ -16,6 +16,7 @@ from backend.auto_like_scheduler import (
     start_auto_like_scheduler,
     stop_auto_like_scheduler,
 )
+from backend.data.account_alerts import clear_alerts, list_alerts
 from backend.data.accounts import list_accounts_full, list_accounts_public
 from backend.data.auto_like_tasks import (
     get_auto_like_config,
@@ -227,6 +228,18 @@ def api_get_filter_patterns(_auth: None = Depends(require_auth)):
 def api_save_filter_patterns(req: FilterPatternsRequest, _auth: None = Depends(require_auth)):
     patterns = save_filter_patterns(req.patterns)
     return {"ok": True, "patterns": patterns, "count": len(patterns)}
+
+
+@app.get("/api/system-alerts")
+def api_list_system_alerts(_auth: None = Depends(require_auth)):
+    alerts = list_alerts(limit=200)
+    return {"alerts": alerts, "count": len(alerts)}
+
+
+@app.delete("/api/system-alerts")
+def api_clear_system_alerts(_auth: None = Depends(require_auth)):
+    clear_alerts()
+    return {"ok": True}
 
 
 @app.get("/api/settings/auto-like")
@@ -564,6 +577,11 @@ def settings_page():
 
 @app.get("/auto-like")
 def auto_like_page():
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
+
+
+@app.get("/alerts")
+def alerts_page():
     return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
 

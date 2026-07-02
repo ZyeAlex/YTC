@@ -1,26 +1,22 @@
-import json
 import logging
 import random
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from backend.data.app_config import get_bili_cookies
-from backend.services.proxy_bypass import is_proxy_error
+from backend.services.bili_wbi import fetch_wbi_search_page, request_legacy_search
 
 log = logging.getLogger(__name__)
 
 BILI_API_LIMIT = 20
 BILI_MAX_PAGES = 10
 BILI_PAGE_DELAY = 1.0
-BILI_PAGE_RETRY_MAX = 3
+BILI_PAGE_RETRY_MAX = 2
 BILI_RATE_LIMIT_CODES = {-412, -799, -509}
 
 
-def _load_cookie() -> str:
-    cookies = get_bili_cookies()
-    return cookies[0] if cookies else ""
+def _cookie_candidates() -> list[str]:
+    cookies = [c.strip() for c in get_bili_cookies() if (c or "").strip()]
+    return cookies if cookies else [""]
 
 
 def _parse_bili_item(item: dict) -> dict:
@@ -42,39 +38,31 @@ def _parse_bili_item(item: dict) -> dict:
     }
 
 
-def _fetch_search_page(url: str, cookie: str) -> tuple[dict | None, str | None]:
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-    req.add_header("Referer", "https://search.bilibili.com/")
-    if cookie:
-        req.add_header("Cookie", cookie)
+def _is_transient_error(err: str) -> bool:
+    text = (err or "").lower()
+    return any(
+        kw in text
+        for kw in (
+            "timed out",
+            "timeout",
+            "handshake",
+            "connection reset",
+            "connection refused",
+            "urlopen error",
+            "curl: (28)",
+            "curl: (35)",
+            "ssl",
+        )
+    )
 
-    # 不走系统 HTTP 代理，避免 Cursor/VPN 代理 403
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    try:
-        with opener.open(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}"
-    except Exception as e:
-        err = str(e)
-        if is_proxy_error(err):
-            return None, "代理拒绝连接 B站 (HTTP 403)，请关闭系统代理"
-        return None, err
-
-    code = data.get("code")
-    if code != 0:
-        msg = str(data.get("message") or "unknown")
-        if code in BILI_RATE_LIMIT_CODES:
-            return None, f"限流(code={code}): {msg}"
-        return None, f"{msg}(code={code})"
-    return data, None
+def _fetch_search_page(params: dict, cookie: str, *, use_wbi: bool) -> tuple[dict | None, str | None]:
+    if use_wbi:
+        return fetch_wbi_search_page(params, cookie)
+    return request_legacy_search(params, cookie)
 
 
 def search_bili(keyword: str, order: str = "pubdate", pages: int = 1) -> dict:
-    cookie = _load_cookie()
-    encoded_kw = urllib.parse.quote(keyword)
     page_count = max(1, min(int(pages), BILI_MAX_PAGES))
     videos: list[dict] = []
     seen: set[str] = set()
@@ -82,36 +70,67 @@ def search_bili(keyword: str, order: str = "pubdate", pages: int = 1) -> dict:
     raw_count = 0
     pages_fetched = 0
     warning = ""
+    cookies = _cookie_candidates()
+    cookie_index = 0
 
     for page in range(1, page_count + 1):
         if page > 1:
             time.sleep(BILI_PAGE_DELAY + random.uniform(0, 0.4))
 
-        url = (
-            f"https://api.bilibili.com/x/web-interface/search/type"
-            f"?search_type=video&keyword={encoded_kw}&order={order}"
-            f"&page={page}&pagesize={BILI_API_LIMIT}"
-        )
+        params = {
+            "search_type": "video",
+            "keyword": keyword,
+            "order": order,
+            "page": page,
+            "pagesize": BILI_API_LIMIT,
+            "duration": 0,
+            "tids": 0,
+        }
 
         data = None
         last_error = ""
         for attempt in range(BILI_PAGE_RETRY_MAX):
-            data, last_error = _fetch_search_page(url, cookie)
+            cookie = cookies[cookie_index % len(cookies)]
+            data, last_error = _fetch_search_page(
+                params,
+                cookie,
+                use_wbi=True,
+            )
             if data is not None:
                 break
+            if len(cookies) > 1:
+                cookie_index += 1
             if attempt + 1 < BILI_PAGE_RETRY_MAX:
-                backoff = (attempt + 1) * 1.5 + random.uniform(0, 0.5)
-                log.info("B站搜索第 %s 页失败，%ss 后重试: %s", page, round(backoff, 1), last_error)
+                backoff = min(10.0, (attempt + 1) * 2.5) + random.uniform(0, 1.0)
+                log.info(
+                    "B站搜索第 %s 页失败，%ss 后重试: %s",
+                    page,
+                    round(backoff, 1),
+                    (last_error or "")[:160],
+                )
                 time.sleep(backoff)
 
+        if data is None and last_error and _is_transient_error(last_error):
+            data, legacy_err = _fetch_search_page(
+                params,
+                cookies[cookie_index % len(cookies)],
+                use_wbi=False,
+            )
+            if data is None and legacy_err:
+                last_error = legacy_err
+
         if data is None:
+            hint = ""
+            if _is_transient_error(last_error or ""):
+                hint = "（网络连接 B 站超时，请检查网络/代理或稍后重试）"
             if videos:
                 warning = (
-                    f"翻页在第 {page} 页停止：{last_error}。"
-                    f"已拉取 {pages_fetched} 页共 {len(videos)} 条，可能触发了 B 站限流，请稍后重试或减少页数"
+                    f"翻页在第 {page} 页停止：{last_error}{hint}。"
+                    f"已拉取 {pages_fetched} 页共 {len(videos)} 条"
                 )
                 break
-            return {"error": last_error or "unknown", "videos": []}
+            err = (last_error or "unknown") + hint
+            return {"error": err, "videos": []}
 
         batch = data.get("data", {}).get("result") or []
         total_reported = data.get("data", {}).get("numResults", 0)

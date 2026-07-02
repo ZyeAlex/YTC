@@ -97,12 +97,36 @@ body {
 
 .sidebar-footer-nav {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   padding: 10px 12px 12px;
   border-top: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
+}
+
+.sidebar-nav-alerts {
+  position: relative;
+}
+
+.sidebar-alerts-badge {
+  position: absolute;
+  top: 2px;
+  right: 8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--error);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.sidebar-alerts-badge.hidden {
+  display: none;
 }
 
 .sidebar-nav-btn {
@@ -1895,7 +1919,7 @@ body {
   .sidebar { width: 100%; height: auto; max-height: 240px; }
   .main-panel { padding: 16px; }
   .sidebar-footer-nav {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
   }
 }
 
@@ -2668,5 +2692,79 @@ body {
 @media (max-width: 768px) {
   .auto-like-layout {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ── 系统告警 ── */
+
+.system-alerts-panel {
+  margin-top: 0;
+}
+
+.system-alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+
+.system-alert-item {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+}
+
+.system-alert-time {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.system-alert-main {
+  min-width: 0;
+}
+
+.system-alert-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.system-alert-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.system-alert-code {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.system-alert-code.code-10023 {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--warn);
+}
+
+.system-alert-code.code-890500 {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--error);
+}
+
+@media (max-width: 768px) {
+  .system-alert-item {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 }

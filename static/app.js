@@ -109,6 +109,7 @@ const state = {
   failedVideosExpanded: false,
   sendingVideos: new Set(),
   mainView: "task",
+  systemAlertsCount: 0,
 };
 
 const dialog = {
@@ -419,10 +420,19 @@ function isSettingsRoute() {
   return window.location.pathname === "/settings";
 }
 
+function isAlertsRoute() {
+  return window.location.pathname === "/alerts";
+}
+
+function isNonTaskView() {
+  return state.mainView === "auto-like" || state.mainView === "settings" || state.mainView === "alerts";
+}
+
 function updateSidebarNav() {
   const view = state.mainView;
   $("#sidebarNavTasks")?.classList.toggle("active", view === "task");
   $("#sidebarNavAutoLike")?.classList.toggle("active", view === "auto-like");
+  $("#sidebarNavAlerts")?.classList.toggle("active", view === "alerts");
   $("#sidebarNavSettings")?.classList.toggle("active", view === "settings");
 }
 
@@ -452,6 +462,16 @@ function setAutoLikeUrl(replace = false) {
 function setSettingsUrl(replace = false) {
   const url = new URL(`${window.location.origin}/settings`);
   const stateObj = { view: "settings" };
+  if (replace) {
+    window.history.replaceState(stateObj, "", url);
+  } else {
+    window.history.pushState(stateObj, "", url);
+  }
+}
+
+function setAlertsUrl(replace = false) {
+  const url = new URL(`${window.location.origin}/alerts`);
+  const stateObj = { view: "alerts" };
   if (replace) {
     window.history.replaceState(stateObj, "", url);
   } else {
@@ -512,6 +532,7 @@ function resetAppState() {
   settings.globalLogs = [];
   settings.runningChannels = new Set();
   settings.selectedChannelKey = null;
+  state.systemAlertsCount = 0;
 }
 
 // ── Meta ──
@@ -526,6 +547,102 @@ async function loadMeta() {
 }
 
 // ── Settings ──
+
+function formatAlertTime(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function updateAlertsBadge(count) {
+  state.systemAlertsCount = count || 0;
+  const badge = $("#sidebarAlertsBadge");
+  if (!badge) return;
+  if (state.systemAlertsCount > 0) {
+    badge.textContent = state.systemAlertsCount > 99 ? "99+" : String(state.systemAlertsCount);
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
+async function loadSystemAlerts() {
+  const data = await api("/api/system-alerts");
+  const alerts = data.alerts || [];
+  updateAlertsBadge(data.count || alerts.length);
+  return alerts;
+}
+
+function renderSystemAlerts(alerts) {
+  const list = $("#systemAlertsList");
+  if (!list) return;
+  if (!alerts.length) {
+    list.innerHTML = `<div class="empty-hint">暂无告警</div>`;
+    return;
+  }
+  list.innerHTML = alerts.map((a) => {
+    const codeClass = a.error_code === 890500 ? "code-890500" : "code-10023";
+    const channel = escapeHtml(a.channel_name || `${a.guild_id}/${a.channel_id}`);
+    const account = escapeHtml(a.account_label || a.account_id);
+    const msg = escapeHtml(a.message || a.error_label || "");
+    return `
+      <div class="system-alert-item">
+        <div class="system-alert-time">${escapeHtml(formatAlertTime(a.ts))}</div>
+        <div class="system-alert-main">
+          <div class="system-alert-title">${channel}</div>
+          <div class="system-alert-meta">账号 ${account}${msg ? ` · ${msg}` : ""}</div>
+        </div>
+        <span class="system-alert-code ${codeClass}">${a.error_code}</span>
+      </div>`;
+  }).join("");
+}
+
+function showSystemAlertsView() {
+  hideAllMainPanels();
+  state.mainView = "alerts";
+  stopAutoLikePolling();
+  $("#systemAlertsView")?.classList.remove("hidden");
+  renderSidebar();
+  updateSidebarNav();
+}
+
+async function openSystemAlertsView({ updateUrl = true } = {}) {
+  try {
+    const alerts = await loadSystemAlerts();
+    showSystemAlertsView();
+    renderSystemAlerts(alerts);
+    if (updateUrl && !isAlertsRoute()) {
+      setAlertsUrl();
+    }
+  } catch (e) {
+    console.error("加载系统告警失败:", e);
+    showSystemAlertsView();
+    renderSystemAlerts([]);
+    if (updateUrl && !isAlertsRoute()) {
+      setAlertsUrl();
+    }
+  }
+}
+
+async function clearSystemAlerts() {
+  if (!confirm("确定清空全部系统告警记录？")) return;
+  try {
+    await api("/api/system-alerts", { method: "DELETE" });
+    updateAlertsBadge(0);
+    renderSystemAlerts([]);
+  } catch (e) {
+    alert(`清空失败: ${e.message}`);
+  }
+}
+
+async function refreshSystemAlertsBadge() {
+  try {
+    await loadSystemAlerts();
+  } catch {
+    /* ignore badge refresh errors */
+  }
+}
 
 function showSettingsView() {
   hideAllMainPanels();
@@ -1177,6 +1294,13 @@ function bindSettingsEvents() {
     openSettingsView().catch((e) => alert(`加载设置失败: ${e.message}`));
   });
 
+  $("#sidebarNavAlerts")?.addEventListener("click", () => {
+    if (state.mainView === "alerts") return;
+    openSystemAlertsView().catch((e) => alert(`加载告警失败: ${e.message}`));
+  });
+
+  $("#clearSystemAlertsBtn")?.addEventListener("click", clearSystemAlerts);
+
   $("#saveAccountsBtn")?.addEventListener("click", saveAccountsSettings);
   $("#saveBiliCookiesBtn")?.addEventListener("click", saveBiliCookiesSettings);
   $("#saveDouyinCookiesBtn")?.addEventListener("click", saveDouyinCookiesSettings);
@@ -1346,7 +1470,7 @@ async function refreshTasks() {
 }
 
 function syncSelectedTask() {
-  if (state.mainView === "auto-like" || state.mainView === "settings") return;
+  if (isNonTaskView()) return;
   if (!state.selectedTaskId) {
     if (state.taskDetail) clearTaskView();
     return;
@@ -1357,7 +1481,8 @@ function syncSelectedTask() {
 
 async function pollDetail() {
   await refreshTasks();
-  if (state.mainView === "auto-like" || state.mainView === "settings") return;
+  await refreshSystemAlertsBadge();
+  if (isNonTaskView()) return;
   if (!state.selectedTaskId) return;
 
   if (!state.tasks.some((t) => t.task_id === state.selectedTaskId)) {
@@ -1401,6 +1526,7 @@ function hideAllMainPanels() {
   $("#emptyState")?.classList.add("hidden");
   $("#taskDetail")?.classList.add("hidden");
   $("#autoLikeView")?.classList.add("hidden");
+  $("#systemAlertsView")?.classList.add("hidden");
   $("#settingsView")?.classList.add("hidden");
 }
 
@@ -3537,13 +3663,17 @@ function bindEvents() {
       await openAutoLikeView({ updateUrl: false });
       return;
     }
+    if (isAlertsRoute()) {
+      await openSystemAlertsView({ updateUrl: false });
+      return;
+    }
     if (isSettingsRoute()) {
       await openSettingsView({ updateUrl: false });
       return;
     }
     const urlId = getTaskIdFromUrl();
     if (urlId && state.tasks.some((t) => t.task_id === urlId)) {
-      if (urlId !== state.selectedTaskId || state.mainView === "auto-like" || state.mainView === "settings") {
+      if (urlId !== state.selectedTaskId || isNonTaskView()) {
         await selectTask(urlId, { updateUrl: false });
       }
       return;
@@ -3557,9 +3687,12 @@ function bindEvents() {
 async function bootstrapApp() {
   await loadMeta();
   await refreshTasks();
+  await refreshSystemAlertsBadge();
 
   if (isAutoLikeRoute()) {
     await openAutoLikeView({ updateUrl: false });
+  } else if (isAlertsRoute()) {
+    await openSystemAlertsView({ updateUrl: false });
   } else if (isSettingsRoute()) {
     await openSettingsView({ updateUrl: false });
   } else {
