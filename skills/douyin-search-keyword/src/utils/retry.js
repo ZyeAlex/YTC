@@ -8,6 +8,13 @@ const constants = require("../config/constants");
  * @returns {Promise<object>} - 包含函数执行结果的 Promise
  * @throws {Error} - 重试次数用尽后抛出最后一次错误
  */
+function isNonRetryableError(error) {
+  const msg = String(error?.message || "");
+  return /frequency\s+is\s+too\s+high|token.*invalid|无效|权限|AUTH_ERROR/i.test(
+    msg,
+  );
+}
+
 async function withRetry(fn, maxAttempts, errorHandler) {
   let lastError;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -15,6 +22,9 @@ async function withRetry(fn, maxAttempts, errorHandler) {
       return await fn(attempt);
     } catch (error) {
       lastError = error;
+      if (isNonRetryableError(error)) {
+        throw error;
+      }
       if (errorHandler) errorHandler(attempt, error);
       if (attempt < maxAttempts - 1) {
         const delay = Math.pow(2, attempt) * constants.RETRY_INTERVAL;

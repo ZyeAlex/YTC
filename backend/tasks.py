@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -39,6 +40,11 @@ OLD_RATIO_PAUSE_12H = 0.30
 OLD_RATIO_PAUSE_24H = 0.70
 PAUSE_12H_SECONDS = 12 * 3600
 PAUSE_24H_SECONDS = 24 * 3600
+SEARCH_ERROR_PAUSE_SECONDS = 5 * 60
+_SEARCH_COOLDOWN_MINUTES_RE = re.compile(
+    r"try\s+again\s+in\s+(\d+)\s*minutes?",
+    re.IGNORECASE,
+)
 
 MAX_VIDEO_DOWNLOAD_FAILURES = 3
 DOWNLOAD_RETRY_COOLDOWN = 300
@@ -1133,6 +1139,30 @@ def _is_recurring(task: TaskState) -> bool:
     return task.payload.get("task_type") == TASK_TYPE_RECURRING
 
 
+def _is_search_rate_limit_error(error: str) -> bool:
+    text = (error or "").lower()
+    return (
+        "frequency is too high" in text
+        or "frequency" in text and "too high" in text
+        or "rate limit" in text
+        or "请求过于频繁" in text
+        or "频率" in text and "过高" in text
+    )
+
+
+def _parse_search_cooldown_seconds(error: str) -> int | None:
+    """从 GUAIKEI 限流文案解析建议等待秒数；无法解析时返回 None。"""
+    if not _is_search_rate_limit_error(error):
+        return None
+    match = _SEARCH_COOLDOWN_MINUTES_RE.search(error or "")
+    if match:
+        minutes = int(match.group(1))
+        if minutes >= 60:
+            return PAUSE_24H_SECONDS
+        return minutes * 60 + 120
+    return 30 * 60
+
+
 def _format_pause_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
     if seconds >= 3600:
@@ -1333,8 +1363,17 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> FetchBatchRe
             search_videos, platform, keyword, bili_pages, search_sort
         )
         if search_result.get("error") and not search_result.get("videos"):
-            _log(task, "warn", f"搜索失败: {search_result['error']}")
-            return FetchBatchResult()
+            err = str(search_result["error"])
+            _log(task, "warn", f"搜索失败: {err}")
+            pause_sec = _parse_search_cooldown_seconds(err) or SEARCH_ERROR_PAUSE_SECONDS
+            reason = "api_rate_limit" if _is_search_rate_limit_error(err) else "search_error"
+            until = _apply_recurring_pause(task, pause_sec, reason)
+            _log(
+                task,
+                "warn",
+                f"搜索暂停 {_format_pause_duration(pause_sec)} 后再试",
+            )
+            return FetchBatchResult(added=0, pause_until=until, pause_reason=reason)
 
         warning = search_result.get("warning")
         if warning:
@@ -1613,6 +1652,7 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
                 )
             return
 
+        fetch_result = FetchBatchResult()
         while not _aborted(task_id):
             if not await _wait_task_pause(task_id, task, "fetch_pause_until", "拉取冷却"):
                 return
@@ -1622,6 +1662,9 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
             if fetch_result.pause_until > time.time():
                 continue
             break
+
+        if fetch_result.added <= 0:
+            return
 
 
 def _record_account_alert(
