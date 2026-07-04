@@ -8,11 +8,11 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from backend.config import CACHE_DIR, DOWNLOAD_TIMEOUT, PROBE_TIMEOUT
-from backend.data.account_alerts import append_alert
+from backend.config import CACHE_DIR, DOWNLOAD_WORKER_TIMEOUT
+from backend.data.account_alerts import append_alert, append_download_alert, classify_download_error
 from backend.data.accounts import list_accounts_public
 from backend.schedule import (
     cron_from_legacy_interval,
@@ -22,7 +22,9 @@ from backend.schedule import (
     stagger_start_minute,
     validate_cron,
 )
-from backend.services.download import download_bili, download_douyin, prepare_output_path, should_skip_download
+from backend.services.download import is_valid_local_video, prepare_output_path, should_skip_download
+from backend.services.download_manager import download_manager
+from backend.services.join_channel import format_auto_join_message, join_guild_for_account
 from backend.services.publish import account_label, pick_random_account, publish_video
 from backend.services.search_service import search_videos
 from backend.services.video_order import (
@@ -33,8 +35,14 @@ from backend.services.video_order import (
     sends_newest_last,
 )
 
-CHANNEL_INTERVAL_MIN = 10
-CHANNEL_INTERVAL_MAX = 20
+CHANNEL_INTERVAL_MIN = 2
+CHANNEL_INTERVAL_MAX = 4
+POST_SLOW_WARN_MS = 60_000
+POST_RETRY_SLEEP = {
+    "permission": (3, 6),
+    "rate_limit": (12, 20),
+    "banned": (12, 20),
+}
 
 OLD_RATIO_PAUSE_12H = 0.30
 OLD_RATIO_PAUSE_24H = 0.70
@@ -48,7 +56,7 @@ _SEARCH_COOLDOWN_MINUTES_RE = re.compile(
 
 MAX_VIDEO_DOWNLOAD_FAILURES = 3
 DOWNLOAD_RETRY_COOLDOWN = 300
-STALE_DOWNLOAD_SECONDS = min(240, DOWNLOAD_TIMEOUT // 2)
+STALE_DOWNLOAD_SECONDS = max(DOWNLOAD_WORKER_TIMEOUT.values()) + 60
 RETRYABLE_ERR_TYPES = frozenset({"rate_limit", "permission", "banned"})
 RETRY_REASON_LABEL = {
     "rate_limit": "限流",
@@ -376,7 +384,9 @@ def _prev_video_posted_successfully(task: TaskState, vi: int) -> bool:
 
 
 def _recover_stale_downloading(task: TaskState) -> bool:
-    """下载中状态超时（进程崩溃/协程丢失）时恢复为 pending；运行中的协程不干预。"""
+    """下载中状态超时（进程崩溃/协程丢失）时恢复为 pending；活跃下载子进程不干预。"""
+    if download_manager.is_busy():
+        return False
     if task.task_id in _active_loops:
         return False
     stale_sec = STALE_DOWNLOAD_SECONDS
@@ -453,12 +463,38 @@ def _set_video(task: TaskState, vi: int, **kwargs):
     _persist_tasks()
 
 
+def _record_download_alert(task: TaskState, vi: int, err_msg: str, *, note: str = "") -> None:
+    try:
+        payload = task.payload
+        platform = str(payload.get("platform") or "")
+        videos = payload.get("videos") or []
+        video = videos[vi] if vi < len(videos) else {}
+        vp = task.video_progress[vi] if vi < len(task.video_progress) else {}
+        video_id = str(video.get("id") or vp.get("id") or "")
+        title = str(video.get("title") or vp.get("title") or "")[:120]
+        if not video_id:
+            return
+        parts = [p for p in (note, err_msg) if p]
+        message = " · ".join(parts)[:240]
+        append_download_alert(
+            task_id=task.task_id,
+            platform=platform,
+            video_id=video_id,
+            video_title=title,
+            message=message,
+            error_code=classify_download_error(message),
+        )
+    except Exception:
+        pass
+
+
 def _mark_download_skipped(task: TaskState, vi: int, err_msg: str, *, permanent: bool = False) -> None:
     title = task.video_progress[vi].get("title", "")[:30]
     msg = (err_msg or "下载失败")[:80]
     if permanent:
         _set_video(task, vi, status=VIDEO_SKIPPED, message=f"下载失败，已跳过: {msg[:60]}")
         _log(task, "warn", f"下载失败，已跳过 — {title}")
+        _record_download_alert(task, vi, msg, note="永久跳过")
         return
     vp = task.video_progress[vi]
     fails = int(vp.get("download_failures") or 0) + 1
@@ -471,6 +507,7 @@ def _mark_download_skipped(task: TaskState, vi: int, err_msg: str, *, permanent:
             message=f"多次下载失败({fails})，已跳过: {msg[:40]}",
         )
         _log(task, "warn", f"多次下载失败，已跳过 — {title}")
+        _record_download_alert(task, vi, msg, note=f"多次失败({fails}/{MAX_VIDEO_DOWNLOAD_FAILURES})")
         return
     vp["download_retry_until"] = time.time() + DOWNLOAD_RETRY_COOLDOWN
     _set_video(
@@ -1150,6 +1187,19 @@ def _is_search_rate_limit_error(error: str) -> bool:
     )
 
 
+def _seconds_until_next_midnight() -> int:
+    now = datetime.now()
+    next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return max(1, int((next_midnight - now).total_seconds()))
+
+
+def _is_daily_search_quota_exhausted(error: str) -> bool:
+    if not _is_search_rate_limit_error(error):
+        return False
+    match = _SEARCH_COOLDOWN_MINUTES_RE.search(error or "")
+    return bool(match and int(match.group(1)) >= 60)
+
+
 def _parse_search_cooldown_seconds(error: str) -> int | None:
     """从 GUAIKEI 限流文案解析建议等待秒数；无法解析时返回 None。"""
     if not _is_search_rate_limit_error(error):
@@ -1158,7 +1208,7 @@ def _parse_search_cooldown_seconds(error: str) -> int | None:
     if match:
         minutes = int(match.group(1))
         if minutes >= 60:
-            return PAUSE_24H_SECONDS
+            return _seconds_until_next_midnight()
         return minutes * 60 + 120
     return 30 * 60
 
@@ -1368,11 +1418,11 @@ async def _fetch_and_append_batch(task_id: str, task: TaskState) -> FetchBatchRe
             pause_sec = _parse_search_cooldown_seconds(err) or SEARCH_ERROR_PAUSE_SECONDS
             reason = "api_rate_limit" if _is_search_rate_limit_error(err) else "search_error"
             until = _apply_recurring_pause(task, pause_sec, reason)
-            _log(
-                task,
-                "warn",
-                f"搜索暂停 {_format_pause_duration(pause_sec)} 后再试",
-            )
+            if _is_daily_search_quota_exhausted(err):
+                pause_msg = "搜索额度已耗尽，暂停至次日 0 点后再试"
+            else:
+                pause_msg = f"搜索暂停 {_format_pause_duration(pause_sec)} 后再试"
+            _log(task, "warn", pause_msg)
             return FetchBatchResult(added=0, pause_until=until, pause_reason=reason)
 
         warning = search_result.get("warning")
@@ -1667,6 +1717,39 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
             return
 
 
+async def _permission_alert_with_auto_join(
+    account_id: str,
+    ch: dict,
+    detail: str,
+    task_id: str,
+) -> None:
+    """10023：后台尝试加频道，完成后再写入告警（不阻塞发帖主流程）。"""
+    try:
+        join_result = await asyncio.to_thread(
+            join_guild_for_account,
+            account_id,
+            str(ch.get("guild_id") or ""),
+        )
+        join_msg = format_auto_join_message(join_result)
+    except Exception as exc:
+        join_msg = f"自动加频道失败：{str(exc)[:80]}"
+    parts = [p for p in (detail, join_msg) if p]
+    message = " | ".join(parts)
+    try:
+        append_alert(
+            error_code=10023,
+            account_id=account_id,
+            account_label=account_label(account_id),
+            guild_id=str(ch.get("guild_id") or ""),
+            channel_id=str(ch.get("channel_id") or ""),
+            channel_name=str(ch.get("name") or ""),
+            message=message,
+            task_id=task_id,
+        )
+    except Exception:
+        pass
+
+
 def _record_account_alert(
     err_type: str,
     account_id: str,
@@ -1676,6 +1759,11 @@ def _record_account_alert(
 ) -> None:
     code = ALERT_ERR_CODES.get(err_type)
     if not code:
+        return
+    if err_type == "permission":
+        asyncio.create_task(
+            _permission_alert_with_auto_join(account_id, ch, detail, task_id)
+        )
         return
     try:
         append_alert(
@@ -1692,6 +1780,12 @@ def _record_account_alert(
         pass
 
 
+def _format_ms(ms: int) -> str:
+    if ms >= 60_000:
+        return f"{ms // 1000}s"
+    return f"{ms}ms"
+
+
 async def _post_to_channels(
     task: TaskState,
     vi: int,
@@ -1702,6 +1796,22 @@ async def _post_to_channels(
 ) -> tuple[list[str], list[str], bool]:
     posted: list[str] = []
     failed: list[str] = []
+    total = len(channels)
+    skipped = 0
+    post_times: list[int] = []
+    session_t0 = time.perf_counter()
+
+    try:
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    except OSError:
+        size_mb = 0.0
+
+    title_short = (title or "")[:40]
+    _log(
+        task,
+        "info",
+        f"📮 发帖开始 · {title_short} · {size_mb:.1f}MB · {total} 频道",
+    )
 
     for i, ch in enumerate(channels):
         if _aborted(task.task_id):
@@ -1710,17 +1820,21 @@ async def _post_to_channels(
         guild_id = ch["guild_id"]
         channel_id = ch["channel_id"]
         ch_name = ch.get("name", f"{guild_id}/{channel_id}")
+        seq = f"[{i + 1}/{total}]"
 
         ch_prog = task.video_progress[vi].get("channels", [])
         if i < len(ch_prog) and ch_prog[i].get("status") == CH_DONE:
             posted.append(ch_name)
+            skipped += 1
+            _log(task, "info", f"⏭ {seq} {ch_name} 已发过，跳过")
             continue
 
         account_id = pick_random_account(account_ids)
         _set_channel(task, vi, i, CH_POSTING)
-        _log(task, "info", f"📤 {ch_name}（{account_label(account_id)}）")
+        _log(task, "info", f"📤 {seq} {ch_name}（{account_label(account_id)}）")
 
         include_topics = bool(task.payload.get("include_topics", True))
+        t0 = time.perf_counter()
         ok, err_type, err_detail = await asyncio.to_thread(
             publish_video,
             guild_id,
@@ -1730,26 +1844,38 @@ async def _post_to_channels(
             account_id,
             include_topics=include_topics,
         )
+        post_ms = int((time.perf_counter() - t0) * 1000)
+        post_times.append(post_ms)
 
         if ok:
             posted.append(ch_name)
             _set_channel(task, vi, i, CH_DONE)
-            _log(task, "success", f"✅ {ch_name}")
+            _log(task, "success", f"✅ {seq} {ch_name} · {_format_ms(post_ms)}")
+            if post_ms >= POST_SLOW_WARN_MS:
+                _log(task, "warn", f"🐢 上传偏慢 · {_format_ms(post_ms)} · {size_mb:.1f}MB")
         elif err_type in RETRYABLE_ERR_TYPES:
             if err_type in ALERT_ERR_CODES:
                 _record_account_alert(err_type, account_id, ch, err_detail, task.task_id)
             reason = RETRY_REASON_LABEL.get(err_type, err_type)
-            _log(task, "warn", f"⚠️ {ch_name} {reason}，换号重试...")
+            _log(
+                task,
+                "warn",
+                f"⚠️ {seq} {ch_name} {reason} · {_format_ms(post_ms)}，换号重试…",
+            )
             retry_ok = False
             err_detail2 = err_detail
+            lo, hi = POST_RETRY_SLEEP.get(err_type, (12, 20))
             for attempt in range(1, 4):
                 if _aborted(task.task_id):
                     return posted, failed, True
-                if not await _interruptible_sleep(random.randint(20, 45), task.task_id):
+                retry_wait = random.randint(lo, hi)
+                _log(task, "info", f"⏸ 换号等待 {retry_wait}s（{reason}）")
+                if not await _interruptible_sleep(retry_wait, task.task_id):
                     return posted, failed, True
                 others = [a for a in account_ids if a != account_id] or account_ids
                 retry_account = pick_random_account(others)
                 retry_label = account_label(retry_account)
+                t1 = time.perf_counter()
                 ok2, err_type2, err_detail2 = await asyncio.to_thread(
                     publish_video,
                     guild_id,
@@ -1759,23 +1885,38 @@ async def _post_to_channels(
                     retry_account,
                     include_topics=include_topics,
                 )
+                retry_ms = int((time.perf_counter() - t1) * 1000)
+                post_times.append(retry_ms)
                 if ok2:
                     posted.append(ch_name)
                     _set_channel(task, vi, i, CH_DONE)
-                    _log(task, "success", f"✅ {ch_name} 第{attempt}次换号成功（{retry_label}）")
+                    _log(
+                        task,
+                        "success",
+                        f"✅ {seq} {ch_name} 第{attempt}次换号成功（{retry_label} · {_format_ms(retry_ms)}）",
+                    )
                     retry_ok = True
                     break
                 if err_type2 in ALERT_ERR_CODES:
                     _record_account_alert(err_type2, retry_account, ch, err_detail2, task.task_id)
+                _log(
+                    task,
+                    "warn",
+                    f"⚠️ {seq} {ch_name} 换号{attempt}仍失败 · {_format_ms(retry_ms)}",
+                )
                 account_id = retry_account
             if not retry_ok:
                 failed.append(ch_name)
                 _set_channel(task, vi, i, CH_FAILED, error=err_detail2 or f"{reason}换号失败")
-                _log(task, "error", f"❌ {ch_name} 换号3次仍失败")
+                _log(task, "error", f"❌ {seq} {ch_name} 换号3次仍失败 · {_format_ms(post_ms)}起")
         elif err_type == "content_rejected":
             failed.append(ch_name)
             _set_channel(task, vi, i, CH_FAILED, error=err_detail)
-            _log(task, "error", f"❌ {ch_name} 内容被拒绝：{err_detail[:120]}")
+            _log(
+                task,
+                "error",
+                f"❌ {seq} {ch_name} 内容被拒绝 · {_format_ms(post_ms)}：{err_detail[:100]}",
+            )
             for j in range(i + 1, len(channels)):
                 if j >= len(ch_prog) or ch_prog[j].get("status") in (CH_DONE, CH_FAILED):
                     continue
@@ -1783,28 +1924,36 @@ async def _post_to_channels(
                 failed.append(rest_name)
                 _set_channel(task, vi, j, CH_FAILED, error="内容被拒，已跳过")
             _set_video(task, vi, status=VIDEO_FAILED, message="内容被平台拒绝（错误码 10000）")
-            return posted, failed, False
+            break
         elif err_type == "oidb_limit":
             failed.append(ch_name)
             _set_channel(task, vi, i, CH_FAILED, error=err_detail)
-            _log(task, "error", f"❌ {ch_name} 全局OIDB限流")
+            _log(task, "error", f"❌ {seq} {ch_name} 全局OIDB限流 · {_format_ms(post_ms)}")
             return posted, failed, True
         else:
             failed.append(ch_name)
             _set_channel(task, vi, i, CH_FAILED, error=err_detail or err_type or "未知错误")
             detail = err_detail or err_type or "未知错误"
-            _log(task, "error", f"❌ {ch_name} 发帖失败：{detail[:120]}")
-            _set_video(
-                task,
-                vi,
-                message=f"{ch_name} 发帖失败：{detail[:80]}",
-            )
+            _log(task, "error", f"❌ {seq} {ch_name} 发帖失败 · {_format_ms(post_ms)}：{detail[:100]}")
 
         if i < len(channels) - 1:
             wait_sec = random.randint(CHANNEL_INTERVAL_MIN, CHANNEL_INTERVAL_MAX)
+            _log(task, "info", f"⏸ 频道间隔 {wait_sec}s")
             if not await _interruptible_sleep(wait_sec, task.task_id):
                 return posted, failed, True
 
+    session_ms = int((time.perf_counter() - session_t0) * 1000)
+    ok_count = len(posted)
+    fail_count = len(failed)
+    avg_ms = sum(post_times) // len(post_times) if post_times else 0
+    level = "info" if fail_count == 0 else "warn"
+    _log(
+        task,
+        level,
+        f"🏁 发帖结束 · 成功 {ok_count}/{total}"
+        f"（跳过 {skipped}，失败 {fail_count}）"
+        f" · 会话 {_format_ms(session_ms)} · 均帖 {_format_ms(avg_ms)}",
+    )
     return posted, failed, False
 
 
@@ -1986,24 +2135,41 @@ async def _process_one_video(
             done = sum(1 for c in vp.get("channels", []) if c.get("status") == CH_DONE)
             _log(task, "info", f"[{seq}/{total_videos}] 续发: {title[:50]}（已完成 {done}/{len(channels)} 频道）")
         else:
-            _log(task, "info", f"[{seq}/{total_videos}] 下载: {title[:50]}")
+            label = video_id if platform == "bili" else video_id[:12]
+            _log(task, "info", f"⬇️ 开始下载 [{label}] {title[:50]}")
 
         _set_video(task, vi, status=VIDEO_DOWNLOADING, message="正在下载..." if not partial_post else "续发剩余频道...")
         _persist_tasks()
 
         output_path = prepare_output_path(platform, video_id, title)
         ok, err, skip = False, "下载失败", False
-        try:
-            ok, err, skip = await asyncio.wait_for(
-                asyncio.to_thread(_download, task, platform, video, output_path),
-                timeout=DOWNLOAD_TIMEOUT + PROBE_TIMEOUT + 60,
-            )
-        except asyncio.TimeoutError:
-            ok, err, skip = False, "下载超时", False
-            _log(task, "error", f"下载超时 — {title[:30]}")
-        except Exception as e:
-            ok, err, skip = False, str(e)[:120], False
-            _log(task, "error", f"下载异常 — {title[:30]}: {e}")
+        dl_ms = 0
+
+        if is_valid_local_video(output_path):
+            ok, err, skip = True, "", False
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            _log(task, "info", f"复用已下载文件 ({size_mb:.1f}MB)，跳过下载")
+        else:
+            try:
+                result = await download_manager.run(platform, video, output_path)
+                ok, err, skip = result.ok, result.err, result.skip
+                dl_ms = result.elapsed_ms
+            except Exception as e:
+                ok, err, skip = False, str(e)[:120], False
+                _log(task, "error", f"下载异常 — {title[:30]}: {e}")
+            else:
+                if result.timed_out:
+                    if ok:
+                        size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                        _log(task, "info", f"下载超时但文件已就绪 ({size_mb:.1f}MB)，继续发帖")
+                    else:
+                        pid_note = f" · kill pid={result.killed_pid}" if result.killed_pid else ""
+                        _log(task, "error", f"❌ 下载超时{pid_note} · {dl_ms}ms — {title[:30]}")
+                elif ok:
+                    size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.exists(output_path) else 0
+                    _log(task, "info", f"✅ 下载完成 {size_mb:.1f}MB · {dl_ms}ms")
+                else:
+                    _log(task, "warn", f"❌ 下载失败 · {dl_ms}ms · {(err or '')[:80]}")
 
         downloading = task.video_progress[vi].get("status") == VIDEO_DOWNLOADING
         if downloading or not ok:
@@ -2016,6 +2182,7 @@ async def _process_one_video(
                     _set_video(task, vi, status=VIDEO_PENDING, message="代理错误，待重试")
                     task.status = STATUS_PAUSED
                     _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}")
+                    _record_download_alert(task, vi, err_msg, note="任务已暂停")
                     _persist_tasks()
                     return [], [], True
                 _mark_download_skipped(task, vi, err_msg, permanent=False)
@@ -2034,6 +2201,7 @@ async def _process_one_video(
                 _set_video(task, vi, status=VIDEO_PENDING, message="代理错误，待重试")
                 task.status = STATUS_PAUSED
                 _log(task, "error", f"代理错误，任务已暂停 — {title[:30]}: {err_msg[:60]}")
+                _record_download_alert(task, vi, err_msg, note="任务已暂停")
                 _persist_tasks()
                 return [], [], True
             _mark_download_skipped(task, vi, err_msg, permanent=False)
@@ -2045,7 +2213,6 @@ async def _process_one_video(
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
 
         _set_video(task, vi, status=VIDEO_POSTING, account="随机轮换", message=f"下载完成 ({size_mb:.1f}MB)")
-        _log(task, "info", f"下载完成 ({size_mb:.1f}MB)，{len(account_ids)} 个账号随机发帖")
 
         posted, failed, stop_all = await _post_to_channels(
             task, vi, channels, output_path, title, account_ids
@@ -2074,24 +2241,6 @@ async def _process_one_video(
     lock = _get_video_process_lock(task_id, vi)
     async with lock:
         return await _run()
-
-
-def _download(task: TaskState, platform: str, video: dict, output_path: str) -> tuple[bool, str, bool]:
-    """返回 (success, error_msg, skip)"""
-    if platform == "bili":
-        ok, err, skip = download_bili(video["id"], output_path)
-        if not ok:
-            _log(task, "warn", f"下载失败: {err}")
-            return False, err, skip
-        return True, "", False
-    ok, err, skip = download_douyin(
-        video.get("link", ""),
-        output_path,
-        video.get("play_addr", ""),
-    )
-    if not ok and err:
-        _log(task, "warn", f"下载失败: {err}")
-    return ok, err, skip
 
 
 async def _task_watchdog():

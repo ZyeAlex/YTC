@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import re
 import shutil
@@ -93,6 +94,15 @@ def _cli_error_detail(output: str) -> str:
     return text[-160:]
 
 
+def _publish_timeout_sec(video_path: str) -> int:
+    try:
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    except OSError:
+        size_mb = 10.0
+    # 约 40s/MB + 90s 底数，上限 300s（慢网上传小文件也需要余量）
+    return max(120, min(300, int(size_mb * 40 + 90)))
+
+
 def publish_video(
     guild_id: str,
     channel_id: str,
@@ -121,6 +131,7 @@ def publish_video(
         "--json", "--yes",
     ]
     env, tmp_home = _cli_env(token)
+    timeout = _publish_timeout_sec(video_path)
     try:
         result = subprocess.run(
             cmd,
@@ -128,7 +139,7 @@ def publish_video(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=120,
+            timeout=timeout,
             env=env,
         )
         output = (result.stdout or "") + (result.stderr or "")
@@ -146,6 +157,8 @@ def publish_video(
         if '"code":10000' in output or "错误码 10000" in output:
             return False, "content_rejected", detail
         return False, "other", detail
+    except subprocess.TimeoutExpired:
+        return False, "other", f"发帖超时（>{timeout}s）"
     except Exception as e:
         return False, "other", str(e)[:160]
     finally:

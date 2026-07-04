@@ -4,10 +4,16 @@ import sys
 from pathlib import Path
 
 MAX_SIZE_MB = 200
-DOWNLOAD_TIMEOUT = 300
-PROBE_TIMEOUT = 90  # 元数据探测（含 B 站网页拉取重试）
-BILI_PROBE_ATTEMPTS = 3
-BILI_DOWNLOAD_ATTEMPTS = 3
+# 下载 worker 外层 kill 超时（唯一配置源，+30s 内部 deadline 缓冲）
+DOWNLOAD_WORKER_TIMEOUT = {
+    "douyin": 120,
+    "bili": 300,
+}
+DOWNLOAD_WORKER_KILL_BUFFER = 30  # 子进程内部 deadline = 外层 - buffer
+BILI_API_TIMEOUT = 12
+DOUYIN_CURL_MAX_TIME = 15
+# 兼容旧引用（yt-dlp 单次下载上限）
+DOWNLOAD_TIMEOUT = 180
 
 
 def is_frozen() -> bool:

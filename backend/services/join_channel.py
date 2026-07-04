@@ -131,6 +131,29 @@ def find_default_channel_id(token: str, guild_id: str) -> str:
     return channel_id
 
 
+def join_guild_for_account(account_id: str, guild_id: str) -> dict[str, Any]:
+    """用指定账号加入 guild（发帖遇 10023 时自动补救）。"""
+    token = get_token(account_id)
+    if not token:
+        return {"ok": False, "error": "无 Token"}
+    gid = str(guild_id or "").strip()
+    if not gid:
+        return {"ok": False, "error": "缺少 guild_id"}
+    return join_guild_account(token, gid)
+
+
+def format_auto_join_message(result: dict[str, Any]) -> str:
+    if result.get("ok"):
+        if result.get("already"):
+            return "自动加频道：已在频道内"
+        return "自动加频道：加入成功"
+    if result.get("need_verification"):
+        err = str(result.get("error") or "需要验证或审核")
+        return f"自动加频道：{err}"
+    err = str(result.get("error") or "加入失败")
+    return f"自动加频道失败：{err}"
+
+
 def join_guild_account(token: str, guild_id: str) -> dict[str, Any]:
     _, output = run_cli(
         token,

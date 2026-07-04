@@ -3,15 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import random
 import re
 import subprocess
-import time
 from pathlib import Path
 
 from backend.config import (
-    BILI_DOWNLOAD_ATTEMPTS,
-    BILI_PROBE_ATTEMPTS,
     CACHE_DIR,
     DOUYIN_PARSER,
     DOWNLOAD_DIR,
@@ -19,19 +15,11 @@ from backend.config import (
     FFMPEG_PATH,
     MAX_SIZE_MB,
     PATH_ENV,
-    PROBE_TIMEOUT,
     YT_DLP_PATH,
 )
 from backend.data.app_config import get_bili_cookies, get_douyin_cookies
 from backend.data.bili_cookie import header_to_netscape
-
-
-def _subprocess_env() -> dict:
-    env = os.environ.copy()
-    env["PATH"] = PATH_ENV + env.get("PATH", "")
-    return env
-
-
+from backend.services.download_deadline import DownloadDeadline
 from backend.services.proxy_bypass import (
     curl_no_proxy_args,
     is_proxy_error,
@@ -45,8 +33,13 @@ _PROXY_ENV_KEYS = (
 )
 
 
+def _subprocess_env() -> dict:
+    env = os.environ.copy()
+    env["PATH"] = PATH_ENV + env.get("PATH", "")
+    return env
+
+
 def _download_env() -> dict:
-    """下载直连 B站/抖音，不走系统代理。"""
     return sanitize_env(_subprocess_env())
 
 
@@ -75,7 +68,6 @@ def _bili_cookie_candidates() -> list[str]:
 
 def _parse_ytdlp_error(stderr: str, stdout: str, *, has_cookie: bool) -> str:
     text = (stderr + stdout).strip()
-    # 去掉版本警告，保留真实错误
     lines = [
         ln for ln in text.splitlines()
         if "older than 90 days" not in ln and "NotOpenSSLWarning" not in ln
@@ -86,7 +78,7 @@ def _parse_ytdlp_error(stderr: str, stdout: str, *, has_cookie: bool) -> str:
     if "403 Forbidden" in text and is_proxy_error(text):
         return "代理拒绝连接 B站 (HTTP 403)，请关闭 VPN/系统代理后重试"
     if "Requested format is not available" in text:
-        return "视频格式不可用，将尝试其他清晰度"
+        return "视频格式不可用"
     if _is_transient_download_error(text):
         return "连接 B 站超时"
     if not text:
@@ -99,21 +91,11 @@ def _is_transient_download_error(err: str) -> bool:
     return any(
         kw in text
         for kw in (
-            "timed out",
-            "timeout",
-            "handshake",
-            "connection reset",
-            "connection refused",
-            "incomplete read",
-            "transport error",
-            "unable to download webpage",
-            "urlopen error",
-            "curl: (28)",
-            "curl: (35)",
-            "ssl",
-            "read operation timed out",
-            "超时",
-            "连接 b 站超时",
+            "timed out", "timeout", "handshake", "connection reset",
+            "connection refused", "incomplete read", "transport error",
+            "unable to download webpage", "urlopen error", "curl: (28)",
+            "curl: (35)", "ssl", "read operation timed out", "超时",
+            "连接 b 站超时", "operation too slow", "incompleteread",
         )
     )
 
@@ -131,7 +113,6 @@ def _douyin_cookie_candidates() -> list[str]:
 
 
 def should_skip_download(err: str) -> bool:
-    """永久跳过：超大文件、图文帖、已删除/私密、B站412、解析器错误等，重试无意义。"""
     text = err or ""
     if "超过" in text and "MB 限制" in text:
         return True
@@ -155,29 +136,29 @@ def _oversize_message(size_mb: float) -> str:
     return f"视频约 {size_mb:.1f}MB 超过 {MAX_SIZE_MB}MB 限制"
 
 
-def _fmt_bytes(fmt: dict) -> int | None:
-    size = fmt.get("filesize") or fmt.get("filesize_approx")
-    return int(size) if size else None
-
-
-def _bili_network_args() -> list[str]:
+def _bili_network_args(*, download: bool = False) -> list[str]:
     return [
         "--proxy", "",
-        "--socket-timeout", "60",
-        "--retries", "8",
-        "--extractor-retries", "5",
-        "--fragment-retries", "8",
-        "--retry-sleep", "linear=2::3",
+        "--socket-timeout", "60" if download else "15",
+        "--retries", "3",
+        "--extractor-retries", "2",
+        "--fragment-retries", "3",
+        "--retry-sleep", "linear=1::2",
         "--impersonate", "Chrome-133:Macos-15",
+        *(
+            ["--downloader-args", "curl:--speed-limit 512 --speed-time 120"]
+            if download
+            else []
+        ),
     ]
 
 
-def _bili_base_cmd(url: str, cookie: Path | None) -> list[str]:
+def _bili_base_cmd(url: str, cookie: Path | None, *, download: bool = False) -> list[str]:
     cmd = [
         YT_DLP_PATH,
         "--no-update",
         "--no-playlist",
-        *_bili_network_args(),
+        *_bili_network_args(download=download),
         url,
     ]
     if FFMPEG_PATH:
@@ -193,7 +174,6 @@ def _bili_base_cmd(url: str, cookie: Path | None) -> list[str]:
 
 
 def _run_ytdlp(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
-    """运行 yt-dlp，超时后强制结束进程。"""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -214,246 +194,6 @@ def _run_ytdlp(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def _probe_bili_info(url: str, cookie: Path | None) -> tuple[dict | None, str]:
-    cmd = [*_bili_base_cmd(url, cookie), "-J", "--no-download"]
-    last_err = ""
-    for attempt in range(BILI_PROBE_ATTEMPTS):
-        try:
-            result = _run_ytdlp(cmd, PROBE_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            last_err = "获取视频信息超时"
-        except Exception as e:
-            last_err = str(e)
-        else:
-            if result.returncode == 0:
-                try:
-                    return json.loads(result.stdout), ""
-                except json.JSONDecodeError:
-                    last_err = "解析视频信息失败"
-            else:
-                last_err = _parse_ytdlp_error(result.stderr, result.stdout, has_cookie=cookie is not None)
-        if not _is_transient_download_error(last_err):
-            break
-        if attempt + 1 < BILI_PROBE_ATTEMPTS:
-            time.sleep((attempt + 1) * 2 + random.uniform(0, 1))
-    return None, last_err
-
-
-def _pick_bili_format(info: dict) -> tuple[str | None, str, bool]:
-    """根据元数据选清晰度；全部超大则下载前直接跳过。"""
-    max_bytes = MAX_SIZE_MB * 1024 * 1024
-    fmts = info.get("formats") or []
-    videos = [f for f in fmts if f.get("vcodec") not in (None, "none")]
-    audios = [
-        f for f in fmts
-        if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
-    ]
-
-    if not videos:
-        return f"best[filesize<{MAX_SIZE_MB}M]/best", "", False
-
-    audio = min(audios, key=lambda f: _fmt_bytes(f) or 0) if audios else None
-    audio_bytes = _fmt_bytes(audio) or 3 * 1024 * 1024
-
-    videos.sort(
-        key=lambda f: (f.get("height") or 0, -(_fmt_bytes(f) or 0)),
-        reverse=True,
-    )
-
-    sized: list[tuple[dict, int]] = []
-    unknown: list[dict] = []
-    for v in videos:
-        vb = _fmt_bytes(v)
-        if vb is None:
-            unknown.append(v)
-            continue
-        sized.append((v, vb + audio_bytes))
-
-    for v, total in sized:
-        if total <= max_bytes:
-            if audio:
-                return f"{v['format_id']}+{audio['format_id']}", "", False
-            return str(v["format_id"]), "", False
-
-    if unknown:
-        max_h = max(v.get("height") or 720 for v in unknown)
-        return (
-            f"bestvideo[height<={max_h}][filesize<{MAX_SIZE_MB}M]+"
-            f"bestaudio[filesize<{MAX_SIZE_MB}M]/best[filesize<{MAX_SIZE_MB}M]",
-            "",
-            False,
-        )
-
-    if sized:
-        _, smallest = min(sized, key=lambda x: x[1])
-        return None, _oversize_message(smallest / (1024 * 1024)), True
-
-    return f"best[filesize<{MAX_SIZE_MB}M]/best", "", False
-
-
-def _head_content_length(url: str, headers: list[str] | None = None) -> int | None:
-    cmd = ["curl", "-sI", "-L", "--max-time", "20", *curl_no_proxy_args()]
-    if headers:
-        cmd.extend(headers)
-    cmd.append(url)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=25, env=_download_env())
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        if line.lower().startswith("content-length:"):
-            try:
-                return int(line.split(":", 1)[1].strip())
-            except ValueError:
-                return None
-    return None
-
-
-def _check_remote_size(url: str, headers: list[str] | None = None) -> tuple[bool, str, bool]:
-    """返回 (ok, err, skip)。已知远程体积超大则下载前跳过。"""
-    length = _head_content_length(url, headers)
-    if length is None:
-        return True, "", False
-    size_mb = length / (1024 * 1024)
-    if size_mb > MAX_SIZE_MB:
-        return False, _oversize_message(size_mb), True
-    return True, "", False
-
-
-def download_bili(bvid: str, output_path: str) -> tuple[bool, str, bool]:
-    url = f"https://www.bilibili.com/video/{bvid}"
-    last_err = ""
-    last_skip = False
-
-    for header in _bili_cookie_candidates():
-        api_ok, api_err, api_skip = _download_bili_via_api(bvid, output_path, header)
-        if api_ok:
-            return True, "", False
-        if api_skip:
-            return False, api_err, True
-        if api_err:
-            last_err = api_err
-
-    for attempt in range(BILI_DOWNLOAD_ATTEMPTS):
-        ok, err, skip = _download_bili_once(bvid, url, output_path)
-        if ok:
-            return True, "", False
-        last_err = err
-        last_skip = skip
-        if skip:
-            break
-        if not _is_transient_download_error(err) and not is_proxy_error(err):
-            break
-        if attempt + 1 < BILI_DOWNLOAD_ATTEMPTS:
-            time.sleep((attempt + 1) * 3 + random.uniform(0, 1.5))
-    if last_skip:
-        return False, last_err, True
-    if _is_transient_download_error(last_err):
-        return False, f"{last_err}（网络连接 B 站不稳定，请稍后重试）", False
-    return False, last_err or "所有下载策略均失败", last_skip
-
-
-def _download_bili_via_api(bvid: str, output_path: str, cookie_header: str) -> tuple[bool, str, bool]:
-    from backend.services.bili_api_download import download_bili_via_api
-
-    return download_bili_via_api(bvid, output_path, cookie_header)
-
-
-def _download_bili_once(bvid: str, url: str, output_path: str) -> tuple[bool, str, bool]:
-    last_err = ""
-    last_skip = False
-    had_cookie = False
-
-    for header in _bili_cookie_candidates():
-        cookie = _cookie_file(header)
-        has_cookie = cookie is not None
-        had_cookie = had_cookie or has_cookie
-
-        info, probe_err = _probe_bili_info(url, cookie)
-        if probe_err and should_skip_download(probe_err):
-            return False, probe_err, True
-        if info is not None:
-            _, pre_err, pre_skip = _pick_bili_format(info)
-            if pre_skip:
-                return False, pre_err, True
-
-        format_options = [
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-            "bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "bestvideo[height<=480]+bestaudio/best[height<=480]",
-            f"best[filesize<{MAX_SIZE_MB}M]/best",
-        ]
-        oversize_err = ""
-
-        for fmt_spec in format_options:
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
-
-            cmd = [
-                *_bili_base_cmd(url, cookie),
-                "--no-progress",
-                "--max-filesize", f"{MAX_SIZE_MB}M",
-                "-f", fmt_spec,
-                "--merge-output-format", "mp4",
-                "-o", output_path,
-            ]
-
-            try:
-                result = _run_ytdlp(cmd, DOWNLOAD_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                last_err = "下载超时"
-                break
-            except Exception as e:
-                last_err = str(e)
-                break
-
-            if result.returncode == 0 and os.path.exists(output_path):
-                size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                if size_mb > MAX_SIZE_MB:
-                    os.remove(output_path)
-                    oversize_err = _oversize_message(size_mb)
-                    continue
-                return True, "", False
-
-            combined = result.stderr + result.stdout
-            last_err = _parse_ytdlp_error(result.stderr, result.stdout, has_cookie=has_cookie)
-            if "File is larger than max-filesize" in combined:
-                oversize_err = _oversize_message(MAX_SIZE_MB + 1)
-                continue
-            if "Requested format is not available" in combined:
-                continue
-            if "格式不可用" in last_err:
-                continue
-            if should_skip_download(last_err):
-                last_skip = True
-                break
-            if "需要配置 Cookie" in last_err:
-                break
-            if is_proxy_error(last_err):
-                return False, last_err, False
-            if _is_transient_download_error(last_err) or _is_transient_download_error(combined):
-                break
-
-        if oversize_err:
-            return False, oversize_err, True
-        if last_skip:
-            return False, last_err, True
-
-    if not had_cookie:
-        return False, (
-            "B站下载需要 Cookie（设置页 → B站 Cookie 未配置）。"
-            "请在浏览器登录 bilibili.com 后，从开发者工具复制 Cookie 字符串"
-        ), False
-    if should_skip_download(last_err):
-        return False, last_err, True
-    return False, last_err or "所有下载策略均失败", False
-
-
 def _is_valid_mp4(path: str) -> bool:
     try:
         if not os.path.exists(path) or os.path.getsize(path) < 50000:
@@ -465,52 +205,150 @@ def _is_valid_mp4(path: str) -> bool:
         return False
 
 
-def download_douyin(share_url: str, output_path: str, play_addr: str = "") -> tuple[bool, str, bool]:
-    """返回 (success, error_msg, skip) skip=True 表示图文帖"""
+def is_valid_local_video(path: str) -> bool:
+    return _is_valid_mp4(path)
+
+
+def _api_error_skip_ytdlp(err: str) -> bool:
+    """仅永久错误跳过 yt-dlp 兜底。"""
+    text = err or ""
+    if should_skip_download(text):
+        return True
+    for kw in ("412", "权限", "版权", "地区限制", "404"):
+        if kw in text:
+            return True
+    return False
+
+
+def _download_bili_ytdlp_once(
+    bvid: str,
+    url: str,
+    output_path: str,
+    deadline: DownloadDeadline,
+) -> tuple[bool, str, bool]:
+    if deadline.expired():
+        return False, "下载超时", False
+
+    last_err = ""
+    had_cookie = False
+    fmt_spec = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    ytdlp_timeout = deadline.curl_timeout(DOWNLOAD_TIMEOUT)
+
+    for header in _bili_cookie_candidates():
+        cookie = _cookie_file(header)
+        had_cookie = had_cookie or cookie is not None
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+
+        cmd = [
+            *_bili_base_cmd(url, cookie, download=True),
+            "--no-progress",
+            "--max-filesize", f"{MAX_SIZE_MB}M",
+            "-f", fmt_spec,
+            "--merge-output-format", "mp4",
+            "-o", output_path,
+        ]
+        try:
+            result = _run_ytdlp(cmd, ytdlp_timeout)
+        except subprocess.TimeoutExpired:
+            return False, "下载超时", False
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            if size_mb > MAX_SIZE_MB:
+                os.remove(output_path)
+                return False, _oversize_message(size_mb), True
+            return True, "", False
+
+        combined = result.stderr + result.stdout
+        last_err = _parse_ytdlp_error(result.stderr, result.stdout, has_cookie=cookie is not None)
+        if "File is larger than max-filesize" in combined:
+            return False, _oversize_message(MAX_SIZE_MB + 1), True
+        if should_skip_download(last_err):
+            return False, last_err, True
+        if is_proxy_error(last_err):
+            return False, last_err, False
+
+    if not had_cookie:
+        return False, (
+            "B站下载需要 Cookie（设置页 → B站 Cookie 未配置）。"
+            "请在浏览器登录 bilibili.com 后，从开发者工具复制 Cookie 字符串"
+        ), False
+    if _is_transient_download_error(last_err):
+        return False, f"{last_err}（网络连接 B 站不稳定，请稍后重试）", False
+    return False, last_err or "yt-dlp 下载失败", False
+
+
+def download_bili(
+    bvid: str,
+    output_path: str,
+    *,
+    deadline_sec: float | None = None,
+) -> tuple[bool, str, bool]:
+    deadline = DownloadDeadline(deadline_sec)
+    url = f"https://www.bilibili.com/video/{bvid}"
+    last_err = ""
+
+    headers = _bili_cookie_candidates()
+    header = headers[0] if headers else ""
+    api_budget = min(50.0, deadline.remaining() * 0.35)
+    if api_budget >= 15:
+        from backend.services.bili_api_download import download_bili_via_api
+
+        api_ok, api_err, api_skip = download_bili_via_api(
+            bvid, output_path, header, deadline_sec=api_budget,
+        )
+        if api_ok:
+            return True, "", False
+        if api_skip:
+            return False, api_err, True
+        if api_err:
+            last_err = api_err
+            if _api_error_skip_ytdlp(api_err):
+                return False, api_err, True
+
+    remaining = deadline.remaining()
+    if remaining < 30:
+        return False, last_err or "下载超时", False
+
+    ok, err, skip = _download_bili_ytdlp_once(bvid, url, output_path, deadline)
+    if ok:
+        return True, "", False
+    if skip:
+        return False, err, True
+    return False, err or last_err or "所有下载策略均失败", False
+
+
+def download_douyin(
+    share_url: str,
+    output_path: str,
+    *,
+    deadline_sec: float | None = None,
+) -> tuple[bool, str, bool]:
     if not share_url:
         return False, "缺少视频链接", False
 
+    if is_valid_local_video(output_path):
+        return True, "", False
+
+    deadline = DownloadDeadline(deadline_sec)
     saved = {k: os.environ.pop(k, None) for k in _PROXY_ENV_KEYS}
     try:
-        # 搜索返回的 play_addr 会过期，仅作快速尝试，失败则用解析器重拉
-        if play_addr:
-            base_headers = [
-                "-H", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
-                "-H", "referer: https://www.iesdouyin.com/",
-            ]
-            for cookie in _douyin_cookie_candidates():
-                headers = list(base_headers)
-                if cookie:
-                    headers.extend(["-H", f"Cookie: {cookie}"])
-                ok, err, skip = _check_remote_size(play_addr, headers)
-                if not ok:
-                    if skip:
-                        return False, err, skip
-                    continue
-                cmd = ["curl", "-L", "-s", "-o", output_path, "--max-time", "120", *curl_no_proxy_args(), *headers, play_addr]
-                try:
-                    result = subprocess.run(cmd, capture_output=True, timeout=130, env=_download_env())
-                except Exception:
-                    result = None
-                if result and result.returncode == 0 and _is_valid_mp4(output_path):
-                    size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                    if size_mb > MAX_SIZE_MB:
-                        os.remove(output_path)
-                        return False, _oversize_message(size_mb), True
-                    return True, "", False
-                if os.path.exists(output_path):
-                    try:
-                        os.remove(output_path)
-                    except Exception:
-                        pass
-
         output_dir = str(Path(output_path).parent)
         dl_env = _download_env()
         last_err = "解析或下载失败"
         last_skip = False
         for cookie in _douyin_cookie_candidates():
+            if deadline.expired():
+                return False, "下载超时", False
             parser = _load_douyin_parser(cookie)
-            result = parser.download(share_url, output_dir, env=dl_env)
+            result = parser.download(share_url, output_dir, env=dl_env, deadline=deadline)
             if result.get("skip"):
                 last_err = result.get("error", "视频不可下载")
                 last_skip = True
@@ -545,8 +383,7 @@ def download_douyin(share_url: str, output_path: str, play_addr: str = "") -> tu
                         return False, api_reason, True
                 probe = parser.parse_video(share_url)
                 if probe and probe.get("skip"):
-                    reason = probe.get("reason", "视频不可下载")
-                    return False, reason, True
+                    return False, probe.get("reason", "视频不可下载"), True
         if last_skip:
             return False, last_err, True
         return False, last_err, False

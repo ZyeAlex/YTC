@@ -36,8 +36,25 @@ class DouyinNoCookieParser:
             headers.extend(["-H", f"Cookie: {self.cookie}"])
         return headers
 
-    def _curl(self, url: str, max_time: int = 30, env: dict | None = None) -> str:
-        """用 curl 获取 HTML，避免 requests 的 SSL 问题"""
+    def _curl_max_time(self, max_time: int | None, deadline) -> int:
+        if max_time is not None:
+            base = max_time
+        else:
+            try:
+                from backend.config import DOUYIN_CURL_MAX_TIME
+                base = DOUYIN_CURL_MAX_TIME
+            except ImportError:
+                base = 15
+        if deadline is not None:
+            try:
+                return max(5, min(base, int(deadline.remaining())))
+            except Exception:
+                pass
+        return base
+
+    def _curl(self, url: str, max_time: int | None = None, env: dict | None = None, deadline=None) -> str:
+        """用 curl 获取 HTML，Popen 可被进程 kill 连带终止。"""
+        max_time = self._curl_max_time(max_time, deadline)
         run_env = env
         if run_env is None:
             try:
@@ -45,18 +62,29 @@ class DouyinNoCookieParser:
                 run_env = direct_connect_env()
             except ImportError:
                 run_env = os.environ.copy()
-        no_proxy = ["--noproxy", "*"]
-        result = subprocess.run(
-            ["curl", "-s", url,
-             *self._curl_base_headers(),
-             *no_proxy,
-             "-L", "--max-redirs", "5",
-             "--connect-timeout", "10",
-             "--max-time", str(max_time)],
-            capture_output=True, text=True,
+        cmd = [
+            "curl", "-s", url,
+            *self._curl_base_headers(),
+            "--noproxy", "*",
+            "-L", "--max-redirs", "5",
+            "--connect-timeout", "5",
+            "--max-time", str(max_time),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             env=run_env,
+            start_new_session=True,
         )
-        return result.stdout
+        try:
+            stdout, _ = proc.communicate(timeout=max_time + 10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=5)
+            return ""
+        return stdout or ""
 
     def get_video_id(self, share_url: str) -> str:
         """从分享链接提取视频 ID（支持 video 和 note 类型）"""
@@ -125,7 +153,7 @@ class DouyinNoCookieParser:
                 return fl[0].get("detail_msg") or fl[0].get("notice") or "视频不可观看"
         return ""
 
-    def _fetch_video_info_res(self, video_id: str, is_note: bool) -> dict | None:
+    def _fetch_video_info_res(self, video_id: str, is_note: bool, deadline=None) -> dict | None:
         if is_note:
             url = f"https://www.iesdouyin.com/share/note/{video_id}/"
             page_key = "note_(id)/page"
@@ -133,11 +161,8 @@ class DouyinNoCookieParser:
             url = f"https://www.iesdouyin.com/share/video/{video_id}/"
             page_key = "video_(id)/page"
 
-        html = self._curl(url)
+        html = self._curl(url, deadline=deadline)
         start = html.find("window._ROUTER_DATA = ")
-        if start < 0 and "</script>" not in html:
-            html = self._curl(url, max_time=35)
-            start = html.find("window._ROUTER_DATA = ")
         if start < 0:
             return None
 
@@ -159,12 +184,12 @@ class DouyinNoCookieParser:
 
     def _probe_web_detail(self, video_id: str) -> str:
         """页面未带 filter_list 时，用 web detail 接口确认是否已删除/私密。"""
-        for attempt in range(3):
+        for attempt in range(2):
             reason = self._probe_web_detail_once(video_id)
             if reason:
                 return reason
-            if attempt < 2:
-                time.sleep(0.5)
+            if attempt < 1:
+                time.sleep(0.2)
         return ""
 
     def _probe_web_detail_once(self, video_id: str) -> str:
@@ -209,32 +234,26 @@ class DouyinNoCookieParser:
                 return status_msg
         return ""
 
-    def _resolve_parse(self, share_url: str) -> dict | None:
+    def _resolve_parse(self, share_url: str, deadline=None) -> dict | None:
         """解析分享链接，优先识别不可观看（删除/私密）再返回正常结果。"""
+        if deadline is not None:
+            try:
+                if deadline.expired():
+                    return None
+            except Exception:
+                pass
         video_id = self.get_video_id(share_url)
         if not video_id:
             return None
 
         is_note = "/note/" in share_url
-        res = None
-        for attempt in range(5):
-            res = self._fetch_video_info_res(video_id, is_note)
-            if res:
-                items = res.get("item_list", [])
-                if items:
-                    info = self._aweme_to_info(items[0], video_id, is_note)
-                    if info:
-                        return info
-                reason = self._unavailable_reason(res)
-                if reason:
-                    return {"skip": True, "reason": reason}
-            api_reason = self._probe_web_detail(video_id)
-            if api_reason:
-                return {"skip": True, "reason": api_reason}
-            if attempt < 4:
-                time.sleep(0.6)
-
+        res = self._fetch_video_info_res(video_id, is_note, deadline=deadline)
         if res:
+            items = res.get("item_list", [])
+            if items:
+                info = self._aweme_to_info(items[0], video_id, is_note)
+                if info:
+                    return info
             reason = self._unavailable_reason(res)
             if reason:
                 return {"skip": True, "reason": reason}
@@ -280,36 +299,41 @@ class DouyinNoCookieParser:
             "type": "note" if is_note else "video",
         }
 
-    def parse_video(self, share_url: str) -> dict:
-        """
-        解析抖音视频（无需 Cookie，支持 video 和 note 类型）
+    def parse_video(self, share_url: str, deadline=None) -> dict:
+        return self._resolve_parse(share_url, deadline=deadline)
 
-        返回示例：
-        {
-            "video_id": "7630854312982382713",
-            "desc": "异环的车辆破坏系统 #异环 #异环手游",
-            "author": "1emon",
-            "cover_url": "https://...",
-            "nwm_url": "https://aweme.snssdk.com/aweme/v1/play/?...",
-            "type": "video" | "note",
-        }
-        返回 None 表示解析失败
-        """
-        return self._resolve_parse(share_url)
+    def _run_curl_download(self, cmd: list, env: dict, timeout: int) -> bool:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            proc.communicate(timeout=timeout + 10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=5)
+            return False
+        return proc.returncode == 0
 
-    def download(self, share_url: str, output_dir: str = "/tmp/bili_video", env: dict | None = None) -> dict:
-        """
-        解析并下载视频，返回本地文件路径
+    def download(
+        self,
+        share_url: str,
+        output_dir: str = "/tmp/bili_video",
+        env: dict | None = None,
+        deadline=None,
+    ) -> dict:
+        if deadline is not None:
+            try:
+                if deadline.expired():
+                    return {"error": "下载超时"}
+            except Exception:
+                pass
 
-        返回 {"path": "...} 或 {"error": "..."}
-        """
-        info = None
-        for attempt in range(3):
-            info = self._resolve_parse(share_url)
-            if info:
-                break
-            if attempt < 2:
-                time.sleep(0.8)
+        info = self._resolve_parse(share_url, deadline=deadline)
         if info and info.get("skip"):
             return {"skip": True, "error": info.get("reason", "视频不可下载")}
         if not info:
@@ -330,16 +354,29 @@ class DouyinNoCookieParser:
             except ImportError:
                 env = os.environ.copy()
 
-        head = subprocess.run(
-            ["curl", "-sI", "-L", "--max-time", "15", "--noproxy", "*",
-             *self._curl_base_headers(),
-             "-H", "referer: https://www.iesdouyin.com/",
-             nwm_url],
-            capture_output=True, text=True,
+        curl_max = self._curl_max_time(15, deadline)
+        head_cmd = [
+            "curl", "-sI", "-L", "--max-time", str(curl_max), "--noproxy", "*",
+            *self._curl_base_headers(),
+            "-H", "referer: https://www.iesdouyin.com/",
+            nwm_url,
+        ]
+        head_proc = subprocess.Popen(
+            head_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             env=env,
+            start_new_session=True,
         )
-        if head.returncode == 0:
-            for line in head.stdout.splitlines():
+        try:
+            head_out, _ = head_proc.communicate(timeout=curl_max + 10)
+        except subprocess.TimeoutExpired:
+            head_proc.kill()
+            head_proc.communicate(timeout=5)
+            head_out = ""
+        if head_proc.returncode == 0 and head_out:
+            for line in head_out.splitlines():
                 if line.lower().startswith("content-length:"):
                     try:
                         size_mb = int(line.split(":", 1)[1].strip()) / (1024 * 1024)
@@ -353,21 +390,27 @@ class DouyinNoCookieParser:
                         pass
                     break
 
-        subprocess.run(
-            ["curl", "-L", nwm_url,
-             *self._curl_base_headers(),
-             "--noproxy", "*",
-             "-H", "referer: https://www.iesdouyin.com/",
-             "-o", out_path,
-             "--max-time", "120"],
-            capture_output=True, text=True,
-            env=env,
-        )
+        dl_max = self._curl_max_time(60, deadline)
+        dl_cmd = [
+            "curl", "-L", nwm_url,
+            *self._curl_base_headers(),
+            "--noproxy", "*",
+            "-H", "referer: https://www.iesdouyin.com/",
+            "-o", out_path,
+            "--connect-timeout", "5",
+            "--max-time", str(dl_max),
+        ]
+        if not self._run_curl_download(dl_cmd, env, dl_max):
+            if os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+            return {"error": "下载失败，文件太小或不存在"}
 
         if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
             return {"path": out_path, "info": info}
-        else:
-            return {"error": "下载失败，文件太小或不存在"}
+        return {"error": "下载失败，文件太小或不存在"}
 
 
 def parse_douyin_video(share_url: str) -> dict:

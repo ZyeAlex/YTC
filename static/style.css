@@ -2770,6 +2770,16 @@ body {
   color: var(--error);
 }
 
+.system-alert-code.code-download {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.system-alert-code.code-other {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-dim);
+}
+
 @media (max-width: 768px) {
   .system-alert-item {
     grid-template-columns: 1fr;

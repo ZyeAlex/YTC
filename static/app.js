@@ -612,6 +612,13 @@ async function loadSystemAlerts() {
   return alerts;
 }
 
+function systemAlertCodeClass(code) {
+  if (code === 890500) return "code-890500";
+  if (code === 10023) return "code-10023";
+  if (code >= 91001 && code <= 91099) return "code-download";
+  return "code-other";
+}
+
 function renderSystemAlerts(alerts) {
   const list = $("#systemAlertsList");
   if (!list) return;
@@ -619,17 +626,24 @@ function renderSystemAlerts(alerts) {
     list.innerHTML = `<div class="empty-hint">暂无告警</div>`;
     return;
   }
+  const platformNames = { bili: "B站", douyin: "抖音" };
   list.innerHTML = alerts.map((a) => {
-    const codeClass = a.error_code === 890500 ? "code-890500" : "code-10023";
-    const channel = escapeHtml(a.channel_name || `${a.guild_id}/${a.channel_id}`);
+    const codeClass = systemAlertCodeClass(a.error_code);
+    const isDownload = a.kind === "download" || (a.error_code >= 91001 && a.error_code <= 91099);
+    const title = isDownload
+      ? escapeHtml(a.video_title || a.channel_name || a.video_id || "视频下载")
+      : escapeHtml(a.channel_name || `${a.guild_id}/${a.channel_id}`);
     const account = escapeHtml(a.account_label || a.account_id);
     const msg = escapeHtml(a.message || a.error_label || "");
+    const meta = isDownload
+      ? `${escapeHtml(platformNames[a.platform] || a.platform || "下载")} · ${escapeHtml(a.video_id || "")}${msg ? ` · ${msg}` : ""}`
+      : `账号 ${account}${msg ? ` · ${msg}` : ""}`;
     return `
       <div class="system-alert-item">
         <div class="system-alert-time">${escapeHtml(formatAlertTime(a.ts))}</div>
         <div class="system-alert-main">
-          <div class="system-alert-title">${channel}</div>
-          <div class="system-alert-meta">账号 ${account}${msg ? ` · ${msg}` : ""}</div>
+          <div class="system-alert-title">${title}</div>
+          <div class="system-alert-meta">${meta}</div>
         </div>
         <span class="system-alert-code ${codeClass}">${a.error_code}</span>
       </div>`;
