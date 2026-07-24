@@ -63,11 +63,11 @@ class DouyinNoCookieParser:
             except ImportError:
                 run_env = os.environ.copy()
         cmd = [
-            "curl", "-s", url,
+            "curl", "-4", "-sS", url,
             *self._curl_base_headers(),
             "--noproxy", "*",
             "-L", "--max-redirs", "5",
-            "--connect-timeout", "5",
+            "--connect-timeout", "8",
             "--max-time", str(max_time),
         ]
         proc = subprocess.Popen(
@@ -109,9 +109,10 @@ class DouyinNoCookieParser:
         except ImportError:
             run_env = os.environ.copy()
         result = subprocess.run(
-            ["curl", "-sI", share_url,
+            ["curl", "-4", "-sI", share_url,
              *self._curl_base_headers(),
              "--noproxy", "*",
+             "--connect-timeout", "8",
              "--max-time", "15"],
             capture_output=True, text=True,
             env=run_env,
@@ -302,23 +303,6 @@ class DouyinNoCookieParser:
     def parse_video(self, share_url: str, deadline=None) -> dict:
         return self._resolve_parse(share_url, deadline=deadline)
 
-    def _run_curl_download(self, cmd: list, env: dict, timeout: int) -> bool:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            start_new_session=True,
-        )
-        try:
-            proc.communicate(timeout=timeout + 10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate(timeout=5)
-            return False
-        return proc.returncode == 0
-
     def download(
         self,
         share_url: str,
@@ -333,84 +317,61 @@ class DouyinNoCookieParser:
             except Exception:
                 pass
 
-        info = self._resolve_parse(share_url, deadline=deadline)
-        if info and info.get("skip"):
-            return {"skip": True, "error": info.get("reason", "视频不可下载")}
-        if not info:
-            return {"error": "解析失败，无法获取页面数据"}
-        if not info.get("nwm_url"):
-            return {"error": "解析失败，无法获取视频 URL"}
+        last_err = "解析或下载失败"
+        for attempt in range(2):
+            info = self._resolve_parse(share_url, deadline=deadline)
+            if info and info.get("skip"):
+                return {"skip": True, "error": info.get("reason", "视频不可下载")}
+            if not info:
+                last_err = "解析失败，无法获取页面数据"
+                continue
+            if not info.get("nwm_url"):
+                last_err = "解析失败，无法获取视频 URL"
+                continue
 
-        video_id = info["video_id"]
-        nwm_url = info["nwm_url"]
+            video_id = info["video_id"]
+            nwm_url = info["nwm_url"]
+            os.makedirs(output_dir, exist_ok=True)
+            out_path = os.path.join(output_dir, f"dy_{video_id}.mp4")
 
-        os.makedirs(output_dir, exist_ok=True)
-        out_path = os.path.join(output_dir, f"dy_{video_id}.mp4")
-
-        if env is None:
-            try:
-                from backend.services.proxy_bypass import direct_connect_env
-                env = direct_connect_env()
-            except ImportError:
-                env = os.environ.copy()
-
-        curl_max = self._curl_max_time(15, deadline)
-        head_cmd = [
-            "curl", "-sI", "-L", "--max-time", str(curl_max), "--noproxy", "*",
-            *self._curl_base_headers(),
-            "-H", "referer: https://www.iesdouyin.com/",
-            nwm_url,
-        ]
-        head_proc = subprocess.Popen(
-            head_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            start_new_session=True,
-        )
-        try:
-            head_out, _ = head_proc.communicate(timeout=curl_max + 10)
-        except subprocess.TimeoutExpired:
-            head_proc.kill()
-            head_proc.communicate(timeout=5)
-            head_out = ""
-        if head_proc.returncode == 0 and head_out:
-            for line in head_out.splitlines():
-                if line.lower().startswith("content-length:"):
-                    try:
-                        size_mb = int(line.split(":", 1)[1].strip()) / (1024 * 1024)
-                        from backend.config import MAX_SIZE_MB
-                        if size_mb > MAX_SIZE_MB:
-                            return {
-                                "skip": True,
-                                "error": f"视频约 {size_mb:.1f}MB 超过 {MAX_SIZE_MB}MB 限制",
-                            }
-                    except ValueError:
-                        pass
-                    break
-
-        dl_max = self._curl_max_time(60, deadline)
-        dl_cmd = [
-            "curl", "-L", nwm_url,
-            *self._curl_base_headers(),
-            "--noproxy", "*",
-            "-H", "referer: https://www.iesdouyin.com/",
-            "-o", out_path,
-            "--connect-timeout", "5",
-            "--max-time", str(dl_max),
-        ]
-        if not self._run_curl_download(dl_cmd, env, dl_max):
             if os.path.exists(out_path):
                 try:
                     os.remove(out_path)
                 except Exception:
                     pass
-            return {"error": "下载失败，文件太小或不存在"}
 
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-            return {"path": out_path, "info": info}
-        return {"error": "下载失败，文件太小或不存在"}
+            dl_max = self._curl_max_time(90, deadline)
+            try:
+                from backend.services.curl_utils import curl_download_file
+
+                ok, err = curl_download_file(
+                    nwm_url,
+                    out_path,
+                    cookie=self.cookie,
+                    referer="https://www.iesdouyin.com/",
+                    timeout=dl_max,
+                    min_bytes=10_000,
+                )
+            except ImportError:
+                ok, err = False, "curl 工具不可用"
+
+            if ok and os.path.exists(out_path):
+                return {"path": out_path, "info": info}
+
+            last_err = err or "下载失败，文件太小或不存在"
+            if os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+            if attempt == 0 and last_err in (
+                "下载失败，文件太小或不存在",
+                "下载内容非 MP4 视频",
+            ):
+                continue
+            break
+
+        return {"error": last_err}
 
 
 def parse_douyin_video(share_url: str) -> dict:

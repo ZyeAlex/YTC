@@ -9,7 +9,9 @@ import sys
 import time
 from dataclasses import dataclass
 
-from backend.config import DOWNLOAD_WORKER_KILL_BUFFER, DOWNLOAD_WORKER_TIMEOUT
+from collections.abc import Callable
+
+from backend.config import DOWNLOAD_WORKER_KILL_BUFFER, DOWNLOAD_WORKER_TIMEOUT, ROOT
 from backend.services.download import is_valid_local_video
 
 log = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class DownloadManager:
         if cls._instance is None:
             inst = super().__new__(cls)
             inst._active_proc: asyncio.subprocess.Process | None = None
+            inst._active_output_path: str | None = None
             inst._lock = asyncio.Lock()
             cls._instance = inst
         return cls._instance
@@ -45,8 +48,12 @@ class DownloadManager:
         platform: str,
         video: dict,
         output_path: str,
+        *,
+        on_acquire: Callable[[], None] | None = None,
     ) -> DownloadResult:
         async with self._lock:
+            if on_acquire:
+                on_acquire()
             return await self._run_locked(platform, video, output_path)
 
     async def _run_locked(
@@ -70,6 +77,7 @@ class DownloadManager:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(ROOT),
         )
         self._active_proc = proc
         try:

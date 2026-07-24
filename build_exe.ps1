@@ -21,15 +21,69 @@ function Test-CommandExists($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Enable-InsecureSsl {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = `
+            [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
+    } catch {}
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]"InsecureSslCallback").Type) {
+            Add-Type @"
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public static class InsecureSslCallback {
+  public static void Enable() {
+    ServicePointManager.ServerCertificateValidationCallback =
+      delegate { return true; };
+  }
+}
+"@
+        }
+        [InsecureSslCallback]::Enable()
+    } catch {}
+}
+
 function Ensure-Uv {
-    if (Test-CommandExists "uv") { return }
-    Write-Host "→ 未检测到 uv，正在安装..."
-    irm https://astral.sh/uv/install.ps1 | iex
     $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
-    if (-not (Test-CommandExists "uv")) {
-        Write-Host "✗ uv 安装失败"
-        exit 1
+    if (Test-CommandExists "uv") { return }
+
+    Write-Host "→ 未检测到 uv，正在安装..."
+    Enable-InsecureSsl
+
+    try {
+        $script = (Invoke-WebRequest -Uri "https://astral.sh/uv/install.ps1" -UseBasicParsing).Content
+        Invoke-Expression $script
+        $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
+        if (Test-CommandExists "uv") { return }
+    } catch {
+        Write-Host "  官方脚本失败: $($_.Exception.Message)"
     }
+
+    foreach ($url in @(
+        "https://ghfast.top/https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
+        "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+    )) {
+        try {
+            $zip = Join-Path $env:TEMP "uv-win.zip"
+            $extract = Join-Path $env:TEMP "uv-win-extract"
+            $destDir = Join-Path $env:USERPROFILE ".local\bin"
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $extract -Force
+            $uvExe = Get-ChildItem -Path $extract -Filter "uv.exe" -Recurse | Select-Object -First 1
+            if (-not $uvExe) { throw "压缩包内未找到 uv.exe" }
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Copy-Item $uvExe.FullName (Join-Path $destDir "uv.exe") -Force
+            $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
+            if (Test-CommandExists "uv") { return }
+        } catch {
+            Write-Host "  下载失败: $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "✗ uv 安装失败"
+    exit 1
 }
 
 function Ensure-Venv {

@@ -354,8 +354,8 @@ def api_list_tasks(_auth: None = Depends(require_auth)):
 async def api_create_task(req: TaskCreateRequest, _auth: None = Depends(require_auth)):
     if not req.channels:
         raise HTTPException(400, "请至少选择一个频道")
-    if not req.account_ids:
-        raise HTTPException(400, "请至少选择一个发送账号")
+    if not req.account_types and not req.account_ids:
+        raise HTTPException(400, "请至少选择 QQ 或 Bot")
     if not req.videos and req.task_type != "custom":
         raise HTTPException(400, "没有待发送的视频")
     if (
@@ -369,14 +369,14 @@ async def api_create_task(req: TaskCreateRequest, _auth: None = Depends(require_
     if req.source == "collection" and req.platform != "douyin":
         raise HTTPException(400, "收藏夹任务仅支持抖音")
 
-    account_ids = req.account_ids
     payload = {
         "task_type": req.task_type,
         "platform": "douyin" if req.task_type == "custom" else req.platform,
         "keyword": req.keyword.strip(),
         "videos": [v.model_dump() for v in req.videos],
         "channels": [c.model_dump() for c in req.channels],
-        "account_ids": account_ids,
+        "account_types": list(req.account_types or []),
+        "account_ids": list(req.account_ids or []),
         "schedule_cron": req.schedule_cron.strip(),
         "search_sort": req.search_sort,
         "batch_count": 1 if req.task_type == "recurring" else 0,
@@ -414,8 +414,8 @@ def api_update_task(task_id: str, req: TaskUpdateRequest, _auth: None = Depends(
         raise HTTPException(404, "任务不存在")
     if not req.channels:
         raise HTTPException(400, "请至少选择一个频道")
-    if not req.account_ids:
-        raise HTTPException(400, "请至少选择一个发送账号")
+    if not req.account_types and not req.account_ids:
+        raise HTTPException(400, "请至少选择 QQ 或 Bot")
     if (
         req.task_type == "recurring"
         and not req.keyword.strip()
@@ -433,7 +433,8 @@ def api_update_task(task_id: str, req: TaskUpdateRequest, _auth: None = Depends(
         "keyword": req.keyword.strip(),
         "videos": [v.model_dump() for v in req.videos],
         "channels": [c.model_dump() for c in req.channels],
-        "account_ids": req.account_ids,
+        "account_types": list(req.account_types or []),
+        "account_ids": list(req.account_ids or []),
         "schedule_cron": req.schedule_cron.strip(),
         "search_sort": req.search_sort,
         "source": req.source,

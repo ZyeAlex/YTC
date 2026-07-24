@@ -25,6 +25,8 @@ _cache: dict[str, Any] | None = None
 ERROR_LABELS: dict[int, str] = {
     10023: "无权限（未加入频道）",
     890500: "账号被封禁",
+    100051: "Token 已过期",
+    100063: "Bot 状态异常",
     91001: "下载超时",
     91002: "下载失败",
     91003: "B站风控",
@@ -33,7 +35,7 @@ ERROR_LABELS: dict[int, str] = {
     91006: "代理错误",
 }
 
-ACCOUNT_ALERT_CODES = frozenset({10023, 890500})
+ACCOUNT_ALERT_CODES = frozenset({10023, 890500, 100051, 100063})
 DOWNLOAD_ALERT_CODES = frozenset({91001, 91002, 91003, 91004, 91005, 91006})
 
 
@@ -239,6 +241,31 @@ def list_alerts(*, limit: int = 200) -> list[dict[str, Any]]:
     alerts = list(store.get("alerts") or [])
     cap = max(1, min(limit, MAX_ALERTS))
     return alerts[:cap]
+
+
+def list_abnormal_account_ids(
+    *,
+    error_codes: set[int] | frozenset[int] | None = None,
+    within_sec: int = 24 * 3600,
+) -> set[str]:
+    """近期账号类告警对应的 account_id（用于发帖选号时避开异常 bot）。"""
+    codes = frozenset(error_codes) if error_codes is not None else ACCOUNT_ALERT_CODES
+    cutoff = int(time.time()) - max(60, int(within_sec))
+    found: set[str] = set()
+    with _lock:
+        store = _load_store()
+        alerts = list(store.get("alerts") or [])
+    for item in alerts:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("error_code") or 0) not in codes:
+            continue
+        if int(item.get("ts") or 0) < cutoff:
+            continue
+        aid = str(item.get("account_id") or "").strip()
+        if aid:
+            found.add(aid)
+    return found
 
 
 def clear_alerts() -> None:

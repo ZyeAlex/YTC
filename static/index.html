@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/cron-picker.css?v=3" />
+  <link rel="stylesheet" href="/static/cron-picker.css?v=4" />
   <link rel="stylesheet" href="/static/style.css?v=42" />
 </head>
 <body>
@@ -426,24 +426,11 @@
                 <h3>发送账号</h3>
                 <div class="panel-block-actions">
                   <button type="button" class="link-btn" id="dialogSelectAllAcc">全选</button>
+                  <button type="button" class="link-btn" id="dialogDeselectAllAcc">清空</button>
                 </div>
               </div>
-              <div class="account-groups">
-                <div class="account-group">
-                  <div class="account-group-head">
-                    <h4>QQ 主号</h4>
-                    <button type="button" class="link-btn" id="dialogDeselectQq">清空</button>
-                  </div>
-                  <div id="dialogQqAccounts" class="check-grid compact"></div>
-                </div>
-                <div class="account-group">
-                  <div class="account-group-head">
-                    <h4>Bot 账号</h4>
-                    <button type="button" class="link-btn" id="dialogDeselectBot">清空</button>
-                  </div>
-                  <div id="dialogBotAccounts" class="check-grid compact"></div>
-                </div>
-              </div>
+              <p class="panel-hint panel-hint-inline">只绑定 QQ / Bot 类型，发送时从该类型下随机选用账号</p>
+              <div id="dialogAccountTypes" class="check-grid compact account-type-grid"></div>
             </div>
 
             <div class="panel-block">
@@ -584,7 +571,7 @@
     </div>
   </div>
 
-  <script src="/static/cron-picker.js?v=6"></script>
-  <script src="/static/app.js?v=82"></script>
+  <script src="/static/cron-picker.js?v=7"></script>
+  <script src="/static/app.js?v=83"></script>
 </body>
 </html>

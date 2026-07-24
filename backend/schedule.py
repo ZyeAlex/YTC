@@ -42,13 +42,34 @@ def describe_cron(cron: str) -> str:
     if len(parts) != 5:
         return cron
     mins, hrs, dom, mon, dow = parts
-    hourly = hrs == dom == mon == dow == "*"
+    if not (dom == mon == dow == "*"):
+        return cron
 
+    minute_label = f":{int(mins):02d}" if mins.isdigit() else f"分 {mins}"
+
+    # 按小时（超过一小时的间隔 / 指定时刻）
+    if hrs != "*":
+        if hrs.startswith("*/"):
+            return f"每 {hrs[2:]} 小时的 {minute_label}"
+        if "/" in hrs:
+            start, step = hrs.split("/", 1)
+            if start in ("0", "*"):
+                return f"每 {step} 小时的 {minute_label}"
+            return f"从 {start} 时起每 {step} 小时的 {minute_label}"
+        if "," in hrs or hrs.isdigit():
+            hlist = sorted(int(x) for x in hrs.split(","))
+            if mins.isdigit():
+                times = "、".join(f"{h:02d}{minute_label}" for h in hlist)
+                return f"每天 {times}"
+            return f"在 {hrs} 时的 {minute_label}"
+        return f"{hrs} 时 {minute_label}"
+
+    # 按分钟（每小时内）
     if mins == "*":
-        return "每分钟" if hourly else cron
-    if mins.startswith("*/") and hourly:
+        return "每分钟"
+    if mins.startswith("*/"):
         return f"每 {mins[2:]} 分钟"
-    if "/" in mins and hourly:
+    if "/" in mins:
         start, step = mins.split("/", 1)
         if start in ("0", "*"):
             return f"每 {step} 分钟"
@@ -56,10 +77,9 @@ def describe_cron(cron: str) -> str:
     if "," in mins:
         mlist = sorted(int(x) for x in mins.split(","))
         times = "、".join(f":{m:02d}" for m in mlist)
-        return f"每小时 {times}" if hourly else f"在 {times}（时 {hrs}…）"
+        return f"每小时 {times}"
     if mins.isdigit():
-        t = f":{int(mins):02d}"
-        return f"每小时 {t}" if hourly else f"在 {t}（时 {hrs}…）"
+        return f"每小时 {minute_label}"
     return cron
 
 

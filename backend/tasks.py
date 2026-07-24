@@ -35,13 +35,15 @@ from backend.services.video_order import (
     sends_newest_last,
 )
 
-CHANNEL_INTERVAL_MIN = 2
-CHANNEL_INTERVAL_MAX = 4
+CHANNEL_INTERVAL_MIN = 60
+CHANNEL_INTERVAL_MAX = 180
 POST_SLOW_WARN_MS = 60_000
 POST_RETRY_SLEEP = {
     "permission": (3, 6),
     "rate_limit": (12, 20),
     "banned": (12, 20),
+    "bot_abnormal": (1, 3),
+    "token_expired": (1, 3),
 }
 
 OLD_RATIO_PAUSE_12H = 0.30
@@ -57,15 +59,21 @@ _SEARCH_COOLDOWN_MINUTES_RE = re.compile(
 MAX_VIDEO_DOWNLOAD_FAILURES = 3
 DOWNLOAD_RETRY_COOLDOWN = 300
 STALE_DOWNLOAD_SECONDS = max(DOWNLOAD_WORKER_TIMEOUT.values()) + 60
-RETRYABLE_ERR_TYPES = frozenset({"rate_limit", "permission", "banned"})
+RETRYABLE_ERR_TYPES = frozenset({
+    "rate_limit", "permission", "banned", "bot_abnormal", "token_expired",
+})
 RETRY_REASON_LABEL = {
     "rate_limit": "限流",
     "permission": "无权限",
     "banned": "账号封禁",
+    "bot_abnormal": "Bot 状态异常",
+    "token_expired": "Token 过期",
 }
 ALERT_ERR_CODES = {
     "permission": 10023,
     "banned": 890500,
+    "bot_abnormal": 100063,
+    "token_expired": 100051,
 }
 
 
@@ -104,6 +112,35 @@ CH_FAILED = "failed"
 
 
 from backend.services.proxy_bypass import is_proxy_error
+from backend.data.account_alerts import list_abnormal_account_ids
+
+
+def _pick_post_account(
+    account_ids: list[str],
+    exclude: set[str] | None = None,
+    *,
+    prefer_qq: bool = False,
+) -> str:
+    tried = set(exclude or set())
+    # 避开近期 100063 / 封禁等账号告警（优先用可用 QQ / 健康 bot）
+    abnormal = list_abnormal_account_ids(within_sec=7 * 24 * 3600)
+    tried |= abnormal
+    candidates = [a for a in account_ids if a not in tried]
+    if not candidates:
+        # 告警账号占满时退回：只排除本轮已试
+        candidates = [a for a in account_ids if a not in (exclude or set())] or list(account_ids)
+    if prefer_qq:
+        qq = [a for a in candidates if a.startswith("qq:")]
+        if qq:
+            return random.choice(qq)
+    # 无 prefer_qq 时也优先 QQ，减少抽到已挂 bot
+    qq = [a for a in candidates if a.startswith("qq:")]
+    bots = [a for a in candidates if a.startswith("bot:")]
+    if qq and bots:
+        # 约 70% 走 QQ，保证健康 bot 仍有机会轮换
+        pool = qq if random.random() < 0.7 else bots
+        return random.choice(pool)
+    return random.choice(candidates)
 
 
 def _repair_proxy_skipped_videos(task: TaskState) -> int:
@@ -276,6 +313,28 @@ def _video_download_cooldown(vp: dict) -> bool:
     return until > time.time()
 
 
+def _is_stale_downloading(vp: dict) -> bool:
+    if vp.get("status") != VIDEO_DOWNLOADING:
+        return False
+    started = vp.get("started_at", "")
+    if not started:
+        return True
+    try:
+        t = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - t).total_seconds() > STALE_DOWNLOAD_SECONDS
+    except ValueError:
+        return True
+
+
+def _reset_stale_downloading_item(task: TaskState, vi: int) -> bool:
+    vp = task.video_progress[vi]
+    if not _is_stale_downloading(vp):
+        return False
+    _set_video(task, vi, status=VIDEO_PENDING, message="下载中断，继续重试")
+    vp["started_at"] = ""
+    return True
+
+
 def _video_auto_skip(vp: dict) -> bool:
     """自动任务轮次中不再重试的状态（含发帖/下载失败）。"""
     return vp.get("status") in (VIDEO_DONE, VIDEO_SKIPPED, VIDEO_FAILED)
@@ -384,34 +443,26 @@ def _prev_video_posted_successfully(task: TaskState, vi: int) -> bool:
 
 
 def _recover_stale_downloading(task: TaskState) -> bool:
-    """下载中状态超时（进程崩溃/协程丢失）时恢复为 pending；活跃下载子进程不干预。"""
-    if download_manager.is_busy():
-        return False
-    if task.task_id in _active_loops:
-        return False
-    stale_sec = STALE_DOWNLOAD_SECONDS
-    now = datetime.now()
+    """下载中状态超时（进程崩溃/协程丢失）时恢复为 pending。"""
+    active_path = download_manager.active_output_path if download_manager.is_busy() else None
     recovered = False
+    videos = task.payload.get("videos", [])
     for vi, vp in enumerate(task.video_progress):
-        if vp.get("status") != VIDEO_DOWNLOADING:
+        if not _is_stale_downloading(vp):
             continue
-        started = vp.get("started_at", "")
-        stale = False
-        if not started:
-            stale = True
-        else:
-            try:
-                t = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
-                stale = (now - t).total_seconds() > stale_sec
-            except ValueError:
-                stale = True
-        if not stale:
-            continue
-        recovered = True
-        vp["started_at"] = ""
-        _mark_download_skipped(task, vi, "下载超时", permanent=False)
+        if active_path and vi < len(videos):
+            video = videos[vi]
+            path = prepare_output_path(
+                task.payload.get("platform", ""),
+                video.get("id", ""),
+                video.get("title", ""),
+            )
+            if path == active_path:
+                continue
+        if _reset_stale_downloading_item(task, vi):
+            recovered = True
     if recovered:
-        _log(task, "info", "检测到下载卡住，已重置并按重试策略处理")
+        _log(task, "info", "检测到下载卡住，已重置为待重试")
         _persist_tasks()
     return recovered
 
@@ -582,9 +633,78 @@ def _repair_fatal_post_videos(task: TaskState) -> int:
     return fixed
 
 
-def _account_names(account_ids: list[str]) -> list[str]:
-    acc_map = {a["id"]: a["name"] for a in list_accounts_public()}
-    return [acc_map.get(aid, aid) for aid in account_ids]
+def _repair_retryable_param_update_videos(task: TaskState) -> int:
+    """参数更新后仍卡在 failed +「可重新发送」的视频，重置为 pending。"""
+    fixed = 0
+    for vp in task.video_progress:
+        if vp.get("status") != VIDEO_FAILED:
+            continue
+        msg = vp.get("message") or ""
+        if "可重新发送" not in msg and "参数已更新" not in msg:
+            continue
+        vp["status"] = VIDEO_PENDING
+        vp["download_failures"] = 0
+        vp["download_retry_until"] = 0
+        for c in vp.get("channels") or []:
+            if c.get("status") == CH_FAILED:
+                c["status"] = CH_PENDING
+                c.pop("error", None)
+        fixed += 1
+    return fixed
+
+
+_ACCOUNT_TYPE_LABELS = {"qq": "QQ 主号", "bot": "Bot 账号"}
+
+
+def _sanitize_account_types(account_types: list[str] | None) -> list[str]:
+    """规范化账号类型：仅保留 qq / bot，去重保序。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in account_types or []:
+        t = str(raw or "").strip().lower()
+        if t not in ("qq", "bot") or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _account_types_from_ids(account_ids: list[str] | None) -> list[str]:
+    """从旧版 account_ids 推导绑定的账号类型。"""
+    types: list[str] = []
+    for aid in account_ids or []:
+        s = str(aid or "").strip()
+        if s.startswith("qq:") and "qq" not in types:
+            types.append("qq")
+        elif s.startswith("bot:") and "bot" not in types:
+            types.append("bot")
+    return types
+
+
+def _account_type_labels(account_types: list[str] | None) -> list[str]:
+    return [_ACCOUNT_TYPE_LABELS.get(t, t) for t in _sanitize_account_types(account_types)]
+
+
+def _account_ids_for_types(account_types: list[str] | None) -> list[str]:
+    """按绑定类型展开为当前配置中的全部账号 ID（发送时随机选用）。"""
+    wanted = set(_sanitize_account_types(account_types))
+    if not wanted:
+        return []
+    return [a["id"] for a in list_accounts_public() if a.get("type") in wanted]
+
+
+def _normalize_task_account_binding(payload: dict) -> tuple[list[str], list[str], list[str]]:
+    """
+    统一任务账号绑定为 account_types。
+    兼容旧字段 account_ids：若未显式传类型，则从已选账号 ID 推导。
+    返回 (account_types, account_ids_snapshot, account_names)。
+    """
+    types = _sanitize_account_types(payload.get("account_types"))
+    if not types:
+        types = _account_types_from_ids(payload.get("account_ids"))
+    ids = _account_ids_for_types(types)
+    names = _account_type_labels(types)
+    return types, ids, names
 
 
 def _is_collection_source(task: TaskState | dict) -> bool:
@@ -630,7 +750,10 @@ def _sync_progress_channels(vp: dict, channels: list[dict]) -> dict:
             out["status"] = VIDEO_PENDING
             out["message"] = "参数已更新"
         elif vp.get("status") == VIDEO_FAILED:
+            out["status"] = VIDEO_PENDING
             out["message"] = "参数已更新，可重新发送"
+            out["download_failures"] = 0
+            out["download_retry_until"] = 0
     return out
 
 
@@ -650,7 +773,8 @@ def _merge_task_videos_on_update(
         merged_videos.append({**old_payload.get(vid, {}), **v})
         if vid in old_progress:
             vp = old_progress[vid]
-            if _video_is_terminal(vp):
+            # done/skipped 保持终态；failed 允许随参数更新重置为可重试
+            if vp.get("status") in (VIDEO_DONE, VIDEO_SKIPPED):
                 merged_progress.append(vp)
             else:
                 merged_progress.append(_sync_progress_channels(vp, channels))
@@ -694,12 +818,14 @@ def _task_summary(task: TaskState) -> dict:
 
 def _task_detail(task: TaskState) -> dict:
     payload = task.payload
+    types, ids, names = _normalize_task_account_binding(payload)
     return {
         **_task_summary(task),
         "channels": payload.get("channels", []),
         "videos": payload.get("videos", []),
-        "account_ids": payload.get("account_ids", []),
-        "account_names": payload.get("account_names", []),
+        "account_types": types,
+        "account_ids": ids,
+        "account_names": names or payload.get("account_names", []),
         "search_sort": payload.get("search_sort", "recent"),
         "video_progress": task.video_progress,
         "logs": task.logs[-50:],
@@ -773,6 +899,17 @@ def _ingest_task_item(item: dict) -> bool:
     if _repair_proxy_skipped_videos(task):
         migrated = True
     if _recover_stale_downloading(task):
+        migrated = True
+    if _repair_retryable_param_update_videos(task):
+        migrated = True
+    types, ids, names = _normalize_task_account_binding(task.payload)
+    old_types = list(task.payload.get("account_types") or [])
+    old_aids = list(task.payload.get("account_ids") or [])
+    old_names = list(task.payload.get("account_names") or [])
+    if types != old_types or ids != old_aids or names != old_names:
+        task.payload["account_types"] = types
+        task.payload["account_ids"] = ids
+        task.payload["account_names"] = names
         migrated = True
     return migrated
 
@@ -872,12 +1009,15 @@ def create_task(
     platform = payload.get("platform", "")
     videos = list(payload.get("videos", []))
     channels = payload.get("channels", [])
-    account_ids = payload.get("account_ids", [])
-    if not account_ids:
-        raise ValueError("未选择任何发送账号")
     payload = dict(payload)
+    account_types, account_ids, account_names = _normalize_task_account_binding(payload)
+    if not account_types:
+        raise ValueError("请至少选择 QQ 或 Bot")
+    if not account_ids:
+        raise ValueError("所选账号类型下暂无可用账号")
+    payload["account_types"] = account_types
     payload["account_ids"] = account_ids
-    payload["account_names"] = _account_names(account_ids)
+    payload["account_names"] = account_names
     payload["videos"] = videos
 
     if not name:
@@ -922,16 +1062,19 @@ def update_task(task_id: str, payload: dict, keyword: str = "") -> bool:
     platform = payload.get("platform", "")
     task_type = payload.get("task_type", TASK_TYPE_ONCE)
     channels = payload.get("channels", [])
-    account_ids = payload.get("account_ids", [])
     videos = list(payload.get("videos", []))
     kw = (keyword or payload.get("keyword") or "").strip()
+
+    account_types, account_ids, account_names = _normalize_task_account_binding(payload)
 
     if not videos and task_type != TASK_TYPE_CUSTOM:
         raise ValueError("没有待发送的视频")
     if not channels:
         raise ValueError("请至少选择一个频道")
+    if not account_types:
+        raise ValueError("请至少选择 QQ 或 Bot")
     if not account_ids:
-        raise ValueError("请至少选择一个发送账号")
+        raise ValueError("所选账号类型下暂无可用账号")
     if task_type == TASK_TYPE_RECURRING and not kw and payload.get("source") != SOURCE_COLLECTION:
         raise ValueError("长期任务需要填写搜索关键词")
 
@@ -943,7 +1086,6 @@ def update_task(task_id: str, payload: dict, keyword: str = "") -> bool:
         merged_videos = list(task.payload.get("videos", []))
         merged_progress = list(task.video_progress)
 
-    account_names = _account_names(account_ids)
     batch_count = int(task.payload.get("batch_count", 0))
     if task_type == TASK_TYPE_RECURRING and batch_count < 1:
         batch_count = 1
@@ -955,6 +1097,7 @@ def update_task(task_id: str, payload: dict, keyword: str = "") -> bool:
         "keyword": kw,
         "videos": merged_videos,
         "channels": channels,
+        "account_types": account_types,
         "account_ids": account_ids,
         "account_names": account_names,
         "schedule_cron": payload.get("schedule_cron", task.schedule_cron),
@@ -1536,6 +1679,8 @@ async def _run_video_pass(
             return True
 
         vp = task.video_progress[vi]
+        if vp.get("status") == VIDEO_DOWNLOADING and not _is_stale_downloading(vp):
+            continue
         if _video_auto_skip(vp):
             continue
         if _video_download_cooldown(vp):
@@ -1614,10 +1759,19 @@ async def _run_batch_task_inner(task_id: str, task: TaskState):
     _ensure_video_progress(task)
     _persist_tasks()
 
-    account_ids = payload.get("account_ids", [])
+    account_types, account_ids, account_names = _normalize_task_account_binding(payload)
+    task.payload["account_types"] = account_types
+    task.payload["account_ids"] = account_ids
+    task.payload["account_names"] = account_names
     channels = payload.get("channels", [])
+    if not account_types:
+        _log(task, "error", "未选择 QQ 或 Bot")
+        task.status = STATUS_FAILED
+        task.finished_at = _now_str()
+        _persist_tasks()
+        return
     if not account_ids:
-        _log(task, "error", "未选择任何发送账号")
+        _log(task, "error", "所选账号类型下暂无可用账号")
         task.status = STATUS_FAILED
         task.finished_at = _now_str()
         _persist_tasks()
@@ -1829,7 +1983,7 @@ async def _post_to_channels(
             _log(task, "info", f"⏭ {seq} {ch_name} 已发过，跳过")
             continue
 
-        account_id = pick_random_account(account_ids)
+        account_id = _pick_post_account(account_ids)
         _set_channel(task, vi, i, CH_POSTING)
         _log(task, "info", f"📤 {seq} {ch_name}（{account_label(account_id)}）")
 
@@ -1847,9 +2001,11 @@ async def _post_to_channels(
         post_ms = int((time.perf_counter() - t0) * 1000)
         post_times.append(post_ms)
 
+        channel_ok = False
         if ok:
             posted.append(ch_name)
             _set_channel(task, vi, i, CH_DONE)
+            channel_ok = True
             _log(task, "success", f"✅ {seq} {ch_name} · {_format_ms(post_ms)}")
             if post_ms >= POST_SLOW_WARN_MS:
                 _log(task, "warn", f"🐢 上传偏慢 · {_format_ms(post_ms)} · {size_mb:.1f}MB")
@@ -1865,6 +2021,8 @@ async def _post_to_channels(
             retry_ok = False
             err_detail2 = err_detail
             lo, hi = POST_RETRY_SLEEP.get(err_type, (12, 20))
+            tried_accounts = {account_id}
+            prefer_qq = err_type == "bot_abnormal"
             for attempt in range(1, 4):
                 if _aborted(task.task_id):
                     return posted, failed, True
@@ -1872,8 +2030,10 @@ async def _post_to_channels(
                 _log(task, "info", f"⏸ 换号等待 {retry_wait}s（{reason}）")
                 if not await _interruptible_sleep(retry_wait, task.task_id):
                     return posted, failed, True
-                others = [a for a in account_ids if a != account_id] or account_ids
-                retry_account = pick_random_account(others)
+                retry_account = _pick_post_account(
+                    account_ids, tried_accounts, prefer_qq=prefer_qq,
+                )
+                tried_accounts.add(retry_account)
                 retry_label = account_label(retry_account)
                 t1 = time.perf_counter()
                 ok2, err_type2, err_detail2 = await asyncio.to_thread(
@@ -1890,6 +2050,7 @@ async def _post_to_channels(
                 if ok2:
                     posted.append(ch_name)
                     _set_channel(task, vi, i, CH_DONE)
+                    channel_ok = True
                     _log(
                         task,
                         "success",
@@ -1899,6 +2060,8 @@ async def _post_to_channels(
                     break
                 if err_type2 in ALERT_ERR_CODES:
                     _record_account_alert(err_type2, retry_account, ch, err_detail2, task.task_id)
+                if err_type2 == "bot_abnormal":
+                    prefer_qq = True
                 _log(
                     task,
                     "warn",
@@ -1936,9 +2099,10 @@ async def _post_to_channels(
             detail = err_detail or err_type or "未知错误"
             _log(task, "error", f"❌ {seq} {ch_name} 发帖失败 · {_format_ms(post_ms)}：{detail[:100]}")
 
-        if i < len(channels) - 1:
+        # 发送成功后再发下一频道，间隔 1~3 分钟
+        if channel_ok and i < len(channels) - 1:
             wait_sec = random.randint(CHANNEL_INTERVAL_MIN, CHANNEL_INTERVAL_MAX)
-            _log(task, "info", f"⏸ 频道间隔 {wait_sec}s")
+            _log(task, "info", f"⏸ 频道间隔 {wait_sec // 60}分{wait_sec % 60:02d}秒")
             if not await _interruptible_sleep(wait_sec, task.task_id):
                 return posted, failed, True
 
@@ -1981,7 +2145,9 @@ def can_manual_send_video(task: TaskState, vi: int) -> bool:
         return False
     vp = task.video_progress[vi]
     st = vp.get("status")
-    if st in (VIDEO_DOWNLOADING, VIDEO_DONE):
+    if st == VIDEO_DOWNLOADING:
+        return _is_stale_downloading(vp)
+    if st == VIDEO_DONE:
         return False
     if st == VIDEO_POSTING and not _video_all_channels_done(vp):
         return True
@@ -2003,6 +2169,8 @@ def _find_video_index(task: TaskState, video_id: str) -> int:
 def _prepare_video_manual_send(task: TaskState, vi: int):
     vp = task.video_progress[vi]
     st = vp.get("status")
+    if st == VIDEO_DOWNLOADING:
+        _reset_stale_downloading_item(task, vi)
     if st in (VIDEO_SKIPPED, VIDEO_FAILED):
         vp["status"] = VIDEO_PENDING
         vp["account"] = ""
@@ -2103,13 +2271,19 @@ async def _process_one_video(
     platform = payload["platform"]
     videos = payload["videos"]
     channels = payload["channels"]
-    account_ids = payload.get("account_ids", [])
+    # 每次发送前按类型重新展开，新增的 QQ/Bot 会自动进入随机池
+    _, account_ids, _ = _normalize_task_account_binding(payload)
+    if not account_ids:
+        _log(task, "error", "所选账号类型下暂无可用账号")
+        return [], [], True
 
     if vi >= len(videos):
         return [], [], False
 
     async def _run() -> tuple[list[str], list[str], bool]:
         vp = task.video_progress[vi]
+        if _reset_stale_downloading_item(task, vi):
+            vp = task.video_progress[vi]
         if not manual_retry and _video_auto_skip(vp):
             return [], [], False
         if not manual_retry and _video_download_cooldown(vp):
@@ -2138,9 +2312,6 @@ async def _process_one_video(
             label = video_id if platform == "bili" else video_id[:12]
             _log(task, "info", f"⬇️ 开始下载 [{label}] {title[:50]}")
 
-        _set_video(task, vi, status=VIDEO_DOWNLOADING, message="正在下载..." if not partial_post else "续发剩余频道...")
-        _persist_tasks()
-
         output_path = prepare_output_path(platform, video_id, title)
         ok, err, skip = False, "下载失败", False
         dl_ms = 0
@@ -2149,14 +2320,30 @@ async def _process_one_video(
             ok, err, skip = True, "", False
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             _log(task, "info", f"复用已下载文件 ({size_mb:.1f}MB)，跳过下载")
+        elif partial_post:
+            ok, err, skip = False, "续发文件缺失", False
         else:
+            if download_manager.is_busy():
+                _set_video(task, vi, status=VIDEO_PENDING, message="排队等待下载...")
+                _log(task, "info", "其他视频下载中，排队等待…")
+
+            def _mark_downloading() -> None:
+                _set_video(task, vi, status=VIDEO_DOWNLOADING, message="正在下载...")
+
             try:
-                result = await download_manager.run(platform, video, output_path)
+                result = await download_manager.run(
+                    platform, video, output_path, on_acquire=_mark_downloading,
+                )
                 ok, err, skip = result.ok, result.err, result.skip
                 dl_ms = result.elapsed_ms
+            except asyncio.CancelledError:
+                _reset_stale_downloading_item(task, vi) or _set_video(
+                    task, vi, status=VIDEO_PENDING, message="下载已取消",
+                )
+                raise
             except Exception as e:
-                ok, err, skip = False, str(e)[:120], False
-                _log(task, "error", f"下载异常 — {title[:30]}: {e}")
+                ok, err, skip = False, str(e)[:120] or type(e).__name__, False
+                _log(task, "error", f"下载异常 — {title[:30]}: {err}")
             else:
                 if result.timed_out:
                     if ok:

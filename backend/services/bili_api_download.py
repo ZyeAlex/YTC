@@ -8,9 +8,9 @@ import subprocess
 from typing import Any
 
 from backend.config import FFMPEG_PATH, MAX_SIZE_MB, BILI_API_TIMEOUT
-from backend.services.bili_wbi import get_mixin_key, request_bili_api_json, sign_wbi_query
+from backend.services.bili_wbi import get_mixin_key, sign_wbi_query
+from backend.services.curl_utils import curl_download_file, curl_get_json, is_valid_mp4_file
 from backend.services.download_deadline import DownloadDeadline
-from backend.services.proxy_bypass import curl_no_proxy_args, sanitize_env
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,12 @@ def _streams_from_play_data(play_data: dict, *, max_height: int = 1080) -> tuple
 
 
 def fetch_video_meta(bvid: str, cookie: str = "") -> tuple[dict | None, str | None]:
-    data, err = request_bili_api_json(f"{VIEW_URL}?bvid={bvid}", cookie=cookie, timeout=BILI_API_TIMEOUT)
+    data, err = curl_get_json(
+        f"{VIEW_URL}?bvid={bvid}",
+        cookie=cookie,
+        timeout=BILI_API_TIMEOUT,
+        retries=3,
+    )
     if data is None:
         return None, err
     if data.get("code") != 0:
@@ -67,18 +72,6 @@ def fetch_video_meta(bvid: str, cookie: str = "") -> tuple[dict | None, str | No
         "title": payload.get("title") or "",
         "duration": payload.get("duration") or page.get("duration"),
     }, None
-
-
-def _is_transient_bili_err(err: str) -> bool:
-    text = (err or "").lower()
-    return any(
-        kw in text
-        for kw in (
-            "timeout", "timed out", "handshake", "connection reset",
-            "connection refused", "curl: (28)", "curl: (35)", "ssl",
-            "operation timed out", "transport", "连接 b 站", "不稳定",
-        )
-    )
 
 
 def fetch_playurl(
@@ -118,12 +111,12 @@ def fetch_playurl(
             return payload, None
         return None, str(data.get("message") or f"playurl(code={code})")
 
-    # legacy 无需 WBI nav，下载链路优先
-    data, err = request_bili_api_json(
+    data, err = curl_get_json(
         f"{LEGACY_PLAYURL_URL}?{legacy_q}",
         cookie=cookie,
+        headers=page_headers,
         timeout=BILI_API_TIMEOUT,
-        extra_headers=page_headers,
+        retries=3,
     )
     ok, perr = _parse_play_data(data, err)
     if ok is not None:
@@ -134,11 +127,12 @@ def fetch_playurl(
         return None, key_err or perr or err or "WBI 密钥不可用"
 
     query = sign_wbi_query(params, mixin_key)
-    data, err = request_bili_api_json(
+    data, err = curl_get_json(
         f"{PLAYURL_URL}?{query}",
         cookie=cookie,
+        headers=page_headers,
         timeout=BILI_API_TIMEOUT,
-        extra_headers=page_headers,
+        retries=2,
     )
     return _parse_play_data(data, err or perr)
 
@@ -146,36 +140,15 @@ def fetch_playurl(
 def _curl_download(url: str, output_path: str, cookie: str, deadline: DownloadDeadline) -> tuple[bool, str]:
     if deadline.expired():
         return False, "下载超时"
-    max_time = deadline.curl_timeout(120)
-    cmd = [
-        "curl", "-L", "-sS", "-4",
-        *curl_no_proxy_args(),
-        "--max-time", str(max_time),
-        "-H", "Referer: https://www.bilibili.com/",
-        "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    ]
-    if cookie:
-        cmd.extend(["-H", f"Cookie: {cookie}"])
-    cmd.extend(["-o", output_path, url])
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=sanitize_env(),
-        start_new_session=True,
+    max_time = deadline.curl_timeout(180)
+    ok, err = curl_download_file(
+        url,
+        output_path,
+        cookie=cookie,
+        referer="https://www.bilibili.com/",
+        timeout=max_time,
     )
-    try:
-        _, stderr = proc.communicate(timeout=max_time + 10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate(timeout=5)
-        return False, "下载流超时"
-    if proc.returncode != 0:
-        return False, (stderr or "curl 失败").strip()[:200]
-    if not os.path.exists(output_path) or os.path.getsize(output_path) < 50000:
-        return False, "下载文件无效"
-    return True, ""
+    return ok, err or "下载失败"
 
 
 def _merge_av(video_path: str, audio_path: str, output_path: str, deadline: DownloadDeadline) -> tuple[bool, str]:
@@ -211,7 +184,6 @@ def _try_playurl_combo(
     qn: int,
     fnval: int,
 ) -> tuple[bool, str, bool]:
-    """返回 (ok, err, skip)。"""
     if deadline.expired():
         return False, "下载超时", False
 
@@ -243,7 +215,7 @@ def _try_playurl_combo(
         ok, verr = _curl_download(video_url, output_path, cookie, deadline)
         if not ok:
             return False, verr, False
-        if os.path.exists(output_path):
+        if is_valid_mp4_file(output_path):
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             if size_mb > MAX_SIZE_MB:
                 os.remove(output_path)
@@ -289,7 +261,7 @@ def _try_playurl_combo(
         except Exception as e:
             return False, str(e), False
 
-    if os.path.exists(output_path):
+    if is_valid_mp4_file(output_path):
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         if size_mb > MAX_SIZE_MB:
             os.remove(output_path)
@@ -305,22 +277,15 @@ def download_bili_via_api(
     *,
     deadline_sec: float | None = None,
 ) -> tuple[bool, str, bool]:
-    """通过 view + playurl API 下载，返回 (ok, err, skip)。"""
     deadline = DownloadDeadline(deadline_sec)
     meta, err = fetch_video_meta(bvid, cookie)
     if meta is None:
         return False, err or "获取视频信息失败", False
 
     ok, err, skip = _try_playurl_combo(meta, cookie, output_path, deadline, qn=80, fnval=4048)
-    if ok:
-        return True, "", False
-    if skip:
-        return False, err, True
-    if _is_transient_bili_err(err or ""):
-        return False, err, False
+    if ok or skip:
+        return ok, err, skip
     if deadline.expired():
         return False, "下载超时", False
     ok, err, skip = _try_playurl_combo(meta, cookie, output_path, deadline, qn=64, fnval=16)
-    if ok:
-        return True, "", False
-    return False, err or "API 下载失败", skip
+    return ok, err, skip

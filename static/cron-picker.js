@@ -1,67 +1,191 @@
 /**
- * 分钟 Cron 选择器（输出标准 5 段 cron，时/日/月/周固定为 *）
+ * Cron 选择器（标准 5 段：分 时 日 月 周）
+ * 支持：每 N 分钟 / 指定分钟（每小时） / 每 N 小时 / 指定小时
  */
 (function (global) {
   const MINUTE = { min: 0, max: 59 };
+  const HOUR = { min: 0, max: 23 };
 
-  function parseMinuteField(val) {
+  function clamp(n, bound) {
+    return Math.min(bound.max, Math.max(bound.min, Number.isFinite(+n) ? +n : 0));
+  }
+
+  function clampMin(n) {
+    return clamp(n, MINUTE);
+  }
+
+  function clampHour(n) {
+    return clamp(n, HOUR);
+  }
+
+  function emptyState() {
+    return { mode: "none" };
+  }
+
+  function defaultState() {
+    return { mode: "step", start: 0, step: 20 };
+  }
+
+  function parseField(val, bound) {
     const v = (val || "*").trim();
     if (v === "*") return { mode: "every" };
-    if (v.includes("-")) {
+    if (v.includes("-") && !v.includes("/")) {
       const [a, b] = v.split("-");
-      return { mode: "range", start: clamp(+a), end: clamp(+b) };
+      return { mode: "range", start: clamp(+a, bound), end: clamp(+b, bound) };
     }
     if (v.includes("/")) {
       const [a, b] = v.split("/");
-      const start = a === "*" ? 0 : clamp(+a);
-      return { mode: "step", start, step: Math.max(1, +b) };
+      const start = a === "*" ? 0 : clamp(+a, bound);
+      return { mode: "step", start, step: Math.max(1, +b || 1) };
     }
     if (v.includes(",")) {
-      return { mode: "specific", values: v.split(",").map((x) => clamp(+x)) };
+      return {
+        mode: "specific",
+        values: v.split(",").map((x) => clamp(+x, bound)).filter((x) => !Number.isNaN(x)),
+      };
     }
-    if (/^\d+$/.test(v)) return { mode: "specific", values: [clamp(+v)] };
+    if (/^\d+$/.test(v)) return { mode: "specific", values: [clamp(+v, bound)] };
     return { mode: "every" };
   }
 
-  function serializeMinuteField(state) {
+  function serializeField(state, bound) {
     switch (state.mode) {
       case "every":
         return "*";
       case "range":
-        return `${state.start}-${state.end}`;
-      case "step":
-        return state.start === 0 ? `*/${state.step}` : `${state.start}/${state.step}`;
-      case "specific":
-        return [...new Set(state.values)].sort((a, b) => a - b).join(",");
+        return `${clamp(state.start, bound)}-${clamp(state.end, bound)}`;
+      case "step": {
+        const start = clamp(state.start ?? 0, bound);
+        const step = Math.max(1, +(state.step || 1));
+        return start === 0 ? `*/${step}` : `${start}/${step}`;
+      }
+      case "specific": {
+        const vals = [...new Set((state.values || []).map((x) => clamp(x, bound)))].sort(
+          (a, b) => a - b,
+        );
+        return vals.length ? vals.join(",") : "0";
+      }
       default:
         return "*";
     }
   }
 
-  function clamp(n) {
-    return Math.min(MINUTE.max, Math.max(MINUTE.min, n || 0));
-  }
-
-  function emptyMinuteState() {
-    return { mode: "none" };
-  }
-
   function parseCron(expr, fallback) {
     const parts = (expr || fallback || "0,20,40 * * * *").trim().split(/\s+/);
-    return parseMinuteField(parts[0]);
+    while (parts.length < 5) parts.push("*");
+    const mins = parseField(parts[0], MINUTE);
+    const hrs = parseField(parts[1], HOUR);
+    const restStar = parts.slice(2).every((p) => p === "*");
+
+    // 小时非通配 → 按小时调度（固定到某一分钟）
+    if (restStar && hrs.mode !== "every") {
+      let minute = 0;
+      if (mins.mode === "specific" && mins.values?.length) minute = mins.values[0];
+      else if (mins.mode === "step") minute = mins.start || 0;
+      else if (/^\d+$/.test(String(parts[0]))) minute = +parts[0];
+
+      if (hrs.mode === "step") {
+        return {
+          mode: "hour_step",
+          minute: clampMin(minute),
+          start: hrs.start ?? 0,
+          step: Math.max(1, hrs.step || 2),
+        };
+      }
+      if (hrs.mode === "specific" || hrs.mode === "range") {
+        let values = hrs.values || [];
+        if (hrs.mode === "range") {
+          values = [];
+          const a = Math.min(hrs.start ?? 0, hrs.end ?? 23);
+          const b = Math.max(hrs.start ?? 0, hrs.end ?? 23);
+          for (let h = a; h <= b; h++) values.push(h);
+        }
+        return {
+          mode: "hour_specific",
+          minute: clampMin(minute),
+          values: values.length ? values.map(clampHour) : [0],
+        };
+      }
+    }
+
+    // 每小时内的分钟调度
+    if (mins.mode === "step") {
+      return { mode: "step", start: mins.start ?? 0, step: Math.max(1, mins.step || 20) };
+    }
+    if (mins.mode === "specific") {
+      return { mode: "specific", values: mins.values?.length ? mins.values : [0] };
+    }
+    if (mins.mode === "range") {
+      return { mode: "range", start: mins.start ?? 0, end: mins.end ?? 59 };
+    }
+    if (mins.mode === "every") return { mode: "every" };
+    return defaultState();
   }
 
-  function serializeCron(minuteState) {
-    return `${serializeMinuteField(minuteState)} * * * *`;
+  function serializeCron(state) {
+    switch (state.mode) {
+      case "every":
+        return "* * * * *";
+      case "range":
+        return `${serializeField(state, MINUTE)} * * * *`;
+      case "step":
+        return `${serializeField(state, MINUTE)} * * * *`;
+      case "specific":
+        return `${serializeField(state, MINUTE)} * * * *`;
+      case "hour_step": {
+        const minute = clampMin(state.minute ?? 0);
+        const hourState = {
+          mode: "step",
+          start: clampHour(state.start ?? 0),
+          step: Math.max(1, Math.min(23, +(state.step || 2))),
+        };
+        return `${minute} ${serializeField(hourState, HOUR)} * * *`;
+      }
+      case "hour_specific": {
+        const minute = clampMin(state.minute ?? 0);
+        const hourState = {
+          mode: "specific",
+          values: (state.values || [0]).map(clampHour),
+        };
+        return `${minute} ${serializeField(hourState, HOUR)} * * *`;
+      }
+      default:
+        return "0 * * * *";
+    }
   }
 
   function describeCronLocal(expr) {
     const parts = (expr || "").trim().split(/\s+/);
     if (parts.length !== 5) return expr || "";
-    const mins = parts[0];
-    const hourly = parts.slice(1).every((p) => p === "*");
-    if (!hourly) return `每分钟 ${mins}（时/日/月/周非 *，仅分钟生效）`;
+    const [mins, hrs, dom, mon, dow] = parts;
+    if (!(dom === "*" && mon === "*" && dow === "*")) return expr;
 
+    // 按小时
+    if (hrs !== "*") {
+      const minuteLabel = /^\d+$/.test(mins)
+        ? `:${String(+mins).padStart(2, "0")}`
+        : `分 ${mins}`;
+      if (hrs.startsWith("*/")) return `每 ${hrs.slice(2)} 小时的 ${minuteLabel}`;
+      if (hrs.includes("/")) {
+        const [start, step] = hrs.split("/");
+        return start === "0" || start === "*"
+          ? `每 ${step} 小时的 ${minuteLabel}`
+          : `从 ${start} 时起每 ${step} 小时的 ${minuteLabel}`;
+      }
+      if (hrs.includes(",") || /^\d+$/.test(hrs)) {
+        const hours = hrs
+          .split(",")
+          .map(Number)
+          .sort((a, b) => a - b)
+          .map((h) => `${String(h).padStart(2, "0")}${/^\d+$/.test(mins) ? minuteLabel : ""}`)
+          .join("、");
+        if (/^\d+$/.test(mins)) return `每天 ${hours}`;
+        return `在 ${hrs} 时的 ${minuteLabel}`;
+      }
+      return `${hrs} 时 ${minuteLabel}`;
+    }
+
+    // 按分钟（每小时）
     if (mins === "*") return "每分钟";
     if (mins.startsWith("*/")) return `每 ${mins.slice(2)} 分钟`;
     if (mins.includes("/")) {
@@ -93,19 +217,20 @@
       this.container = typeof container === "string" ? document.querySelector(container) : container;
       this.onChange = options.onChange || (() => {});
       this.allowEmpty = !!options.allowEmpty;
-      this.modes = options.modes || ["step", "specific"];
+      this.modes = options.modes || ["step", "specific", "hour_step", "hour_specific"];
       this.panelEl = null;
       this.footEl = null;
       this.exprInput = null;
       this.descEl = null;
       this.isEmpty = false;
+      this._radioName = `cron-${Math.random().toString(36).slice(2, 8)}`;
 
       const initial = (options.value || "").trim();
       if (this.allowEmpty && !initial) {
         this.isEmpty = true;
-        this.minuteState = emptyMinuteState();
+        this.state = emptyState();
       } else {
-        this.minuteState = this._normalizeMode(parseCron(initial));
+        this.state = this._normalizeMode(parseCron(initial));
       }
 
       this._render();
@@ -123,12 +248,12 @@
     setValue(expr) {
       if (this.allowEmpty && !(expr || "").trim()) {
         this.isEmpty = true;
-        this.minuteState = emptyMinuteState();
+        this.state = emptyState();
         this._applyEmptyView(false);
         return;
       }
       this.isEmpty = false;
-      this.minuteState = this._normalizeMode(parseCron(expr));
+      this.state = this._normalizeMode(parseCron(expr));
       this._syncFromState(false);
       this._renderPanel();
     }
@@ -155,7 +280,7 @@
       this.exprInput.className = "cron-picker-expr";
       this.exprInput.type = "text";
       this.exprInput.spellcheck = false;
-      this.exprInput.placeholder = "0,20,40 * * * *";
+      this.exprInput.placeholder = "0 */2 * * *";
       this.exprInput.addEventListener("change", () => this._applyExprInput());
       this.exprInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") this._applyExprInput();
@@ -174,16 +299,34 @@
         const start = state.start ?? 0;
         const end = state.end ?? 59;
         const step = Math.max(1, end - start || 20);
-        return { mode: "step", start, step };
+        if (this.modes.includes("step")) return { mode: "step", start, step };
       }
-      if (state.mode === "specific" && state.values?.length) {
+      if (state.mode === "specific" && state.values?.length && this.modes.includes("specific")) {
         return { mode: "specific", values: [...state.values] };
       }
-      return { mode: "step", start: 0, step: 20 };
+      if (state.mode === "hour_step" && this.modes.includes("hour_step")) return state;
+      if (state.mode === "hour_specific" && this.modes.includes("hour_specific")) return state;
+      if (this.modes.includes("step")) return defaultState();
+      if (this.modes.includes("hour_step")) {
+        return { mode: "hour_step", minute: 0, start: 0, step: 2 };
+      }
+      return defaultState();
+    }
+
+    _ensureModeDefaults(mode) {
+      if (mode === "every") return { mode: "every" };
+      if (mode === "range") return { mode: "range", start: 0, end: 1 };
+      if (mode === "step") return { mode: "step", start: 0, step: 20 };
+      if (mode === "specific") return { mode: "specific", values: [0, 20, 40] };
+      if (mode === "hour_step") return { mode: "hour_step", minute: 0, start: 0, step: 2 };
+      if (mode === "hour_specific") {
+        return { mode: "hour_specific", minute: 0, values: [9, 15, 21] };
+      }
+      return defaultState();
     }
 
     _renderPanel() {
-      const state = this.minuteState;
+      const state = this.state;
       this.panelEl.innerHTML = "";
 
       if (this.modes.includes("every")) {
@@ -202,28 +345,77 @@
         });
       }
       if (this.modes.includes("specific")) {
-        this._addOption(state, "specific", "指定分钟", (wrap) => {
-          const grid = document.createElement("div");
-          grid.className = "cron-picker-grid";
-          for (let i = 0; i <= 59; i++) {
-            const chip = document.createElement("button");
-            chip.type = "button";
-            chip.className = "cron-picker-chip";
-            chip.textContent = String(i).padStart(2, "0");
-            chip.dataset.v = String(i);
-            chip.addEventListener("click", () => {
-              this.isEmpty = false;
-              state.mode = "specific";
-              if (!state.values?.length) state.values = [];
-              this._toggleSpecific(state, i);
-              this._syncFromState();
-              this._renderPanel();
-            });
-            grid.appendChild(chip);
-          }
-          wrap.appendChild(grid);
+        this._addOption(state, "specific", "指定分钟（每小时）", (wrap) => {
+          wrap.appendChild(this._buildMinuteGrid(state));
         });
       }
+      if (this.modes.includes("hour_step")) {
+        this._addOption(state, "hour_step", null, (wrap) => {
+          wrap.innerHTML =
+            '每 <input type="number" class="cron-picker-num" data-k="step" min="1" max="23" /> 小时，在 <input type="number" class="cron-picker-num" data-k="minute" min="0" max="59" /> 分' +
+            '（从 <input type="number" class="cron-picker-num" data-k="start" min="0" max="23" /> 时起）';
+        });
+      }
+      if (this.modes.includes("hour_specific")) {
+        this._addOption(state, "hour_specific", "指定小时", (wrap) => {
+          const row = document.createElement("div");
+          row.className = "cron-picker-inline";
+          row.innerHTML =
+            '每天在 <input type="number" class="cron-picker-num" data-k="minute" min="0" max="59" /> 分发送：';
+          wrap.appendChild(row);
+          wrap.appendChild(this._buildHourGrid(state));
+        });
+      }
+    }
+
+    _buildMinuteGrid(state) {
+      const grid = document.createElement("div");
+      grid.className = "cron-picker-grid";
+      for (let i = 0; i <= 59; i++) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "cron-picker-chip";
+        chip.textContent = String(i).padStart(2, "0");
+        chip.dataset.v = String(i);
+        chip.addEventListener("click", () => {
+          this.isEmpty = false;
+          if (state.mode !== "specific") {
+            Object.assign(state, this._ensureModeDefaults("specific"));
+          }
+          state.mode = "specific";
+          if (!state.values?.length) state.values = [];
+          this._toggleSpecific(state, i, 0);
+          this._syncFromState();
+          this._renderPanel();
+        });
+        grid.appendChild(chip);
+      }
+      return grid;
+    }
+
+    _buildHourGrid(state) {
+      const grid = document.createElement("div");
+      grid.className = "cron-picker-grid cron-picker-grid-hours";
+      for (let i = 0; i <= 23; i++) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "cron-picker-chip";
+        chip.textContent = String(i).padStart(2, "0");
+        chip.dataset.v = String(i);
+        chip.addEventListener("click", () => {
+          this.isEmpty = false;
+          if (state.mode !== "hour_specific") {
+            Object.assign(state, this._ensureModeDefaults("hour_specific"));
+          }
+          state.mode = "hour_specific";
+          if (!state.values?.length) state.values = [];
+          this._toggleSpecific(state, i, 0);
+          this._syncFromState();
+          this._renderPanel();
+        });
+        grid.appendChild(chip);
+      }
+      return grid;
     }
 
     _addOption(state, mode, labelText, bodyFn) {
@@ -231,7 +423,7 @@
       row.className = "cron-picker-option";
       const radio = document.createElement("input");
       radio.type = "radio";
-      radio.name = `cron-minute-${Math.random().toString(36).slice(2, 8)}`;
+      radio.name = this._radioName;
       radio.value = mode;
       radio.checked = !this.isEmpty && state.mode === mode;
 
@@ -254,19 +446,18 @@
       radio.addEventListener("change", () => {
         if (!radio.checked) return;
         this.isEmpty = false;
-        state.mode = mode;
-        if (state.mode === "every") state.values = [];
-        if (state.mode === "range") {
-          state.start = 0;
-          state.end = 1;
+        const next = this._ensureModeDefaults(mode);
+        // 切换模式时尽量保留分钟
+        if (
+          (mode === "hour_step" || mode === "hour_specific") &&
+          (state.mode === "step" || state.mode === "specific" || state.mode === "hour_step" || state.mode === "hour_specific")
+        ) {
+          if (state.mode === "specific" && state.values?.length) next.minute = state.values[0];
+          else if (typeof state.minute === "number") next.minute = state.minute;
+          else if (typeof state.start === "number" && state.mode === "step") next.minute = state.start;
         }
-        if (state.mode === "step") {
-          state.start = 0;
-          state.step = 20;
-        }
-        if (state.mode === "specific") {
-          state.values = state.values?.length ? state.values : [0];
-        }
+        Object.keys(state).forEach((k) => delete state[k]);
+        Object.assign(state, next);
         this._syncFromState();
         this._renderPanel();
       });
@@ -278,11 +469,13 @@
         const k = input.dataset.k;
         if (k === "start") input.value = state.start ?? 0;
         if (k === "end") input.value = state.end ?? 59;
-        if (k === "step") input.value = state.step ?? 20;
+        if (k === "step") input.value = state.step ?? (mode.startsWith("hour_") ? 2 : 20);
+        if (k === "minute") input.value = state.minute ?? 0;
         input.addEventListener("input", () => {
           if (state.mode !== mode) {
             this.isEmpty = false;
-            state.mode = mode;
+            Object.keys(state).forEach((key) => delete state[key]);
+            Object.assign(state, this._ensureModeDefaults(mode));
             radio.checked = true;
           }
           state[k] = +input.value;
@@ -292,14 +485,17 @@
 
       body.querySelectorAll(".cron-picker-chip").forEach((chip) => {
         const v = +chip.dataset.v;
-        chip.classList.toggle(
-          "selected",
-          !this.isEmpty && state.mode === "specific" && state.values?.includes(v),
-        );
+        const selected =
+          !this.isEmpty &&
+          ((mode === "specific" && state.mode === "specific" && state.values?.includes(v)) ||
+            (mode === "hour_specific" &&
+              state.mode === "hour_specific" &&
+              state.values?.includes(v)));
+        chip.classList.toggle("selected", !!selected);
       });
     }
 
-    _toggleSpecific(state, value) {
+    _toggleSpecific(state, value, emptyFallback) {
       if (!state.values) state.values = [];
       const idx = state.values.indexOf(value);
       if (idx >= 0) state.values.splice(idx, 1);
@@ -307,17 +503,17 @@
       if (!state.values.length) {
         if (this.allowEmpty) {
           this.isEmpty = true;
-          this.minuteState = emptyMinuteState();
+          this.state = emptyState();
           this._applyEmptyView();
           return;
         }
-        state.values = [0];
+        state.values = [emptyFallback];
       }
     }
 
     _syncFromState(emit = true) {
       if (this.isEmpty) return;
-      const expr = serializeCron(this.minuteState);
+      const expr = serializeCron(this.state);
       const ok = validateCronLocal(expr);
       this.exprInput.value = expr;
       this.exprInput.classList.toggle("invalid", !ok);
@@ -330,7 +526,7 @@
       let expr = this.exprInput.value.trim();
       if (this.allowEmpty && !expr) {
         this.isEmpty = true;
-        this.minuteState = emptyMinuteState();
+        this.state = emptyState();
         this._applyEmptyView();
         return;
       }
@@ -343,12 +539,15 @@
         return;
       }
       this.isEmpty = false;
-      this.minuteState = this._normalizeMode(parseCron(expr));
+      this.state = this._normalizeMode(parseCron(expr));
       this._renderPanel();
-      this.exprInput.value = serializeCron(this.minuteState);
+      this.exprInput.value = serializeCron(this.state);
+      this.descEl.textContent = describeCronLocal(this.exprInput.value);
+      this.descEl.classList.remove("error");
       this.onChange(this.exprInput.value);
     }
   }
 
   global.CronPicker = CronPicker;
+  global.describeCronLocal = describeCronLocal;
 })(window);

@@ -19,6 +19,7 @@ from backend.config import (
 )
 from backend.data.app_config import get_bili_cookies, get_douyin_cookies
 from backend.data.bili_cookie import header_to_netscape
+from backend.services.curl_utils import is_valid_mp4_file
 from backend.services.download_deadline import DownloadDeadline
 from backend.services.proxy_bypass import (
     curl_no_proxy_args,
@@ -194,19 +195,8 @@ def _run_ytdlp(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def _is_valid_mp4(path: str) -> bool:
-    try:
-        if not os.path.exists(path) or os.path.getsize(path) < 50000:
-            return False
-        with open(path, "rb") as f:
-            header = f.read(12)
-        return len(header) >= 8 and header[4:8] == b"ftyp"
-    except Exception:
-        return False
-
-
 def is_valid_local_video(path: str) -> bool:
-    return _is_valid_mp4(path)
+    return is_valid_mp4_file(path)
 
 
 def _api_error_skip_ytdlp(err: str) -> bool:
@@ -293,36 +283,30 @@ def download_bili(
 ) -> tuple[bool, str, bool]:
     deadline = DownloadDeadline(deadline_sec)
     url = f"https://www.bilibili.com/video/{bvid}"
-    last_err = ""
+    header = (_bili_cookie_candidates() or [""])[0]
 
-    headers = _bili_cookie_candidates()
-    header = headers[0] if headers else ""
-    api_budget = min(50.0, deadline.remaining() * 0.35)
-    if api_budget >= 15:
-        from backend.services.bili_api_download import download_bili_via_api
+    from backend.services.bili_api_download import download_bili_via_api
 
-        api_ok, api_err, api_skip = download_bili_via_api(
-            bvid, output_path, header, deadline_sec=api_budget,
-        )
-        if api_ok:
-            return True, "", False
-        if api_skip:
-            return False, api_err, True
-        if api_err:
-            last_err = api_err
-            if _api_error_skip_ytdlp(api_err):
-                return False, api_err, True
+    # API 主路径：使用全部剩余预算（慢网下 API 仍比 yt-dlp 快）
+    api_ok, api_err, api_skip = download_bili_via_api(
+        bvid, output_path, header, deadline_sec=deadline.remaining(),
+    )
+    if api_ok:
+        return True, "", False
+    if api_skip:
+        return False, api_err, True
+    if api_err and _api_error_skip_ytdlp(api_err):
+        return False, api_err, True
 
-    remaining = deadline.remaining()
-    if remaining < 30:
-        return False, last_err or "下载超时", False
+    if deadline.remaining() < 45:
+        return False, api_err or "下载超时", False
 
     ok, err, skip = _download_bili_ytdlp_once(bvid, url, output_path, deadline)
     if ok:
         return True, "", False
     if skip:
         return False, err, True
-    return False, err or last_err or "所有下载策略均失败", False
+    return False, err or api_err or "所有下载策略均失败", False
 
 
 def download_douyin(
@@ -358,7 +342,7 @@ def download_douyin(
                     if os.path.exists(output_path):
                         os.remove(output_path)
                     os.rename(result["path"], output_path)
-                if not _is_valid_mp4(output_path):
+                if not is_valid_mp4_file(output_path):
                     try:
                         os.remove(output_path)
                     except Exception:

@@ -130,7 +130,7 @@ const dialog = {
   channelFilter: "all",
   selectedChannels: new Set(),
   selectedVideos: new Set(),
-  selectedAccounts: new Set(),
+  selectedAccountTypes: new Set(["qq", "bot"]),
   cron: "",
   searchSort: "recent",
   includeTopics: true,
@@ -430,7 +430,7 @@ function bindCronInput() {
   cronPicker = new CronPicker(mount, {
     value: dialog.cron || "",
     allowEmpty: true,
-    modes: ["step", "specific"],
+    modes: ["step", "specific", "hour_step", "hour_specific"],
     onChange: (v) => {
       dialog.cron = v;
     },
@@ -1652,7 +1652,7 @@ function renderTaskDetail(force = false) {
       <div class="info-card"><label>Cron</label><span><code>${escapeHtml(t.schedule_cron || "-")}</code></span></div>
       <div class="info-card"><label>创建时间</label><span>${t.created_at || "-"}</span></div>
       <div class="info-card wide"><label>目标频道</label><span>${escapeHtml(chNames)}</span></div>
-      <div class="info-card wide"><label>发送账号</label><span>${escapeHtml(accNames)}</span></div>
+      <div class="info-card wide"><label>发送账号</label><span>${escapeHtml(accNames)}（类型内随机）</span></div>
     `;
     $("#copyTaskLinkBtn")?.addEventListener("click", copyTaskLink);
   }
@@ -1763,7 +1763,7 @@ function buildProgressCardHtml(v, i, taskStatus, { compact = false } = {}) {
     ? "发送失败"
     : (VIDEO_STATUS[v.status] || v.status);
   const cardStatus = isProgressVideoFailed(v) ? "failed" : v.status;
-  const showSend = !isProgressVideoFailed(v) && canManualSend(v, taskStatus);
+  const showSend = canManualSend(v, taskStatus);
   const sending = state.sendingVideos.has(v.id);
   const sendBtn = showSend
     ? `<button type="button" class="btn-send-video" data-send-video="${escapeAttr(v.id)}"${sending ? " disabled" : ""}>${sending ? "…" : sendBtnLabel(v)}</button>`
@@ -1830,6 +1830,12 @@ function renderVideoProgressFull(videos, taskStatus, task = state.taskDetail) {
 
   if (failedWrap && failedList && failedLabel && toggleFailedBtn) {
     if (failed.length) {
+      // 有可重试的失败项时默认展开，避免「可重新发送」却找不到按钮
+      const hasRetryable = failed.some((v) => canManualSend(v, taskStatus));
+      if (hasRetryable && !state._failedAutoExpandOnce) {
+        state.failedVideosExpanded = true;
+        state._failedAutoExpandOnce = true;
+      }
       failedWrap.classList.remove("hidden");
       failedLabel.textContent = `发送失败 ${failed.length} 条`;
       toggleFailedBtn.setAttribute("aria-expanded", state.failedVideosExpanded ? "true" : "false");
@@ -1859,7 +1865,7 @@ function patchProgressCard(card, v, taskStatus) {
     badge.textContent = isProgressVideoFailed(v) ? "发送失败" : (VIDEO_STATUS[v.status] || v.status);
     badge.className = `video-status-badge status-${cardStatus}`;
   }
-  const showSend = !isProgressVideoFailed(v) && canManualSend(v, taskStatus);
+  const showSend = canManualSend(v, taskStatus);
   const sending = state.sendingVideos.has(v.id);
   let btn = card.querySelector(".btn-send-video");
   if (showSend) {
@@ -2129,7 +2135,10 @@ function openDialog() {
   dialog.channelFilter = "all";
   dialog.selectedChannels = new Set();
   dialog.selectedVideos = new Set();
-  dialog.selectedAccounts = new Set(state.accounts.map((a) => a.id));
+  const defaultTypes = [];
+  if (state.accounts.some((a) => a.type === "qq")) defaultTypes.push("qq");
+  if (state.accounts.some((a) => a.type === "bot")) defaultTypes.push("bot");
+  dialog.selectedAccountTypes = new Set(defaultTypes.length ? defaultTypes : ["qq", "bot"]);
   dialog.cron = "";
   dialog.searchSort = "recent";
   dialog.includeTopics = true;
@@ -2185,7 +2194,11 @@ function openEditDialog() {
   dialog.platform = t.platform || "bili";
   dialog.channelFilter = "all";
   dialog.selectedChannels = new Set((t.channels || []).map((ch) => channelKey(ch)));
-  dialog.selectedAccounts = new Set(t.account_ids || []);
+  dialog.selectedAccountTypes = new Set(
+    (t.account_types && t.account_types.length)
+      ? t.account_types
+      : accountTypesFromIds(t.account_ids || []),
+  );
   dialog.includeTopics = t.include_topics !== false;
 
   const payloadVideos = (t.videos || []).map((v) => ({
@@ -2332,32 +2345,45 @@ function toggleDialogChannel(key) {
   updateDialogBtns();
 }
 
-function renderDialogAccounts() {
-  const qq = state.accounts.filter((a) => a.type === "qq");
-  const bot = state.accounts.filter((a) => a.type === "bot");
-  const render = (accounts) =>
-    accounts.map((a) => {
-      const checked = dialog.selectedAccounts.has(a.id);
-      return `
-      <label class="check-item">
-        <input type="checkbox" data-account="${a.id}"${checked ? " checked" : ""} />
-        <span>${escapeHtml(a.name)}</span>
-      </label>`;
-    }).join("");
-  $("#dialogQqAccounts").innerHTML = render(qq);
-  $("#dialogBotAccounts").innerHTML = render(bot);
-}
-
-function setDialogAccount(id, checked) {
-  if (checked) {
-    dialog.selectedAccounts.add(id);
-  } else {
-    dialog.selectedAccounts.delete(id);
+function accountTypesFromIds(accountIds = []) {
+  const types = [];
+  for (const id of accountIds) {
+    if (String(id).startsWith("qq:") && !types.includes("qq")) types.push("qq");
+    if (String(id).startsWith("bot:") && !types.includes("bot")) types.push("bot");
   }
+  return types.length ? types : ["qq", "bot"];
 }
 
-function getDialogAccounts() {
-  return [...dialog.selectedAccounts];
+function renderDialogAccounts() {
+  const qqCount = state.accounts.filter((a) => a.type === "qq").length;
+  const botCount = state.accounts.filter((a) => a.type === "bot").length;
+  const items = [
+    { type: "qq", label: "QQ 主号", count: qqCount },
+    { type: "bot", label: "Bot 账号", count: botCount },
+  ];
+  const el = $("#dialogAccountTypes");
+  if (!el) return;
+  el.innerHTML = items.map((item) => {
+    const checked = dialog.selectedAccountTypes.has(item.type);
+    const disabled = item.count === 0;
+    return `
+      <label class="check-item${disabled ? " disabled" : ""}">
+        <input type="checkbox" data-account-type="${item.type}"
+          ${checked && !disabled ? " checked" : ""}
+          ${disabled ? " disabled" : ""} />
+        <span>${escapeHtml(item.label)}（${item.count} 个，随机选用）</span>
+      </label>`;
+  }).join("");
+}
+
+function setDialogAccountType(type, checked) {
+  if (checked) dialog.selectedAccountTypes.add(type);
+  else dialog.selectedAccountTypes.delete(type);
+  updateDialogBtns();
+}
+
+function getDialogAccountTypes() {
+  return ["qq", "bot"].filter((t) => dialog.selectedAccountTypes.has(t));
 }
 
 function getDialogChannels() {
@@ -2410,7 +2436,8 @@ function toggleDialogVideo(id) {
 
 function updateDialogBtns() {
   const hasChannels = dialog.selectedChannels.size > 0;
-  const hasAccounts = dialog.selectedAccounts.size > 0;
+  const accountTypes = getDialogAccountTypes();
+  const hasAccounts = accountTypes.some((t) => state.accounts.some((a) => a.type === t));
   const hasKeyword = $("#dialogKeyword").value.trim().length > 0;
   const hasVideos = dialog.selectedVideos.size > 0;
   const isCustom = isDialogCustomMode();
@@ -2423,7 +2450,7 @@ function updateDialogBtns() {
   const hint = $("#dialogFooterHint");
   if (!hint) return;
   if (!hasChannels || !hasAccounts) {
-    hint.textContent = "请选择目标频道与发送账号";
+    hint.textContent = "请选择目标频道与 QQ/Bot";
   } else if (!isCustom && !hasVideos) {
     hint.textContent = isCollection ? "请加载并选择收藏视频" : "请搜索并选择视频";
   } else if (!isCustom && !recurringOk && (hasKeyword || isCollection)) {
@@ -2982,7 +3009,7 @@ function readIncludeTopicsFromDialog() {
 
 async function submitDialog(taskType) {
   const channels = getDialogChannels();
-  const accountIds = getDialogAccounts();
+  const accountTypes = getDialogAccountTypes();
   const keyword = $("#dialogKeyword").value.trim();
   const videos = getSelectedDialogVideos();
   const isCustom = taskType === "custom" || isDialogCustomMode();
@@ -2994,7 +3021,11 @@ async function submitDialog(taskType) {
     return;
   }
   if (!channels.length) { alert("请至少选择一个频道"); return; }
-  if (!accountIds.length) { alert("请至少选择一个发送账号"); return; }
+  if (!accountTypes.length) { alert("请至少选择 QQ 或 Bot"); return; }
+  if (!accountTypes.some((t) => state.accounts.some((a) => a.type === t))) {
+    alert("所选账号类型下暂无可用账号");
+    return;
+  }
 
   const btn = taskType === "recurring" ? $("#dialogCreateRecurring") : $("#dialogCreate");
   btn.disabled = true;
@@ -3030,7 +3061,7 @@ async function submitDialog(taskType) {
       platform: isCustom ? "douyin" : (v.platform || dialog.platform),
     })),
     channels,
-    account_ids: accountIds,
+    account_types: accountTypes,
     search_sort: getDialogSearchSort(),
     include_topics: readIncludeTopicsFromDialog(),
     ...readScheduleFromDialog(),
@@ -3649,22 +3680,21 @@ function bindEvents() {
     updateDialogBtns();
   });
 
-  $("#dialogSelectAllAcc").addEventListener("click", () => {
-    state.accounts.forEach((a) => dialog.selectedAccounts.add(a.id));
+  $("#dialogSelectAllAcc")?.addEventListener("click", () => {
+    if (state.accounts.some((a) => a.type === "qq")) dialog.selectedAccountTypes.add("qq");
+    if (state.accounts.some((a) => a.type === "bot")) dialog.selectedAccountTypes.add("bot");
     renderDialogAccounts();
+    updateDialogBtns();
   });
-  $("#dialogDeselectQq").addEventListener("click", () => {
-    state.accounts.filter((a) => a.type === "qq").forEach((a) => dialog.selectedAccounts.delete(a.id));
+  $("#dialogDeselectAllAcc")?.addEventListener("click", () => {
+    dialog.selectedAccountTypes.clear();
     renderDialogAccounts();
-  });
-  $("#dialogDeselectBot").addEventListener("click", () => {
-    state.accounts.filter((a) => a.type === "bot").forEach((a) => dialog.selectedAccounts.delete(a.id));
-    renderDialogAccounts();
+    updateDialogBtns();
   });
 
   $("#taskDialog").addEventListener("change", (e) => {
-    const input = e.target.closest(".account-groups input[data-account]");
-    if (input) setDialogAccount(input.dataset.account, input.checked);
+    const input = e.target.closest("#dialogAccountTypes input[data-account-type]");
+    if (input) setDialogAccountType(input.dataset.accountType, input.checked);
   });
 
   $("#dialogCreate").addEventListener("click", () => {

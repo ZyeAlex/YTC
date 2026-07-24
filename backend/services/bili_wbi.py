@@ -259,54 +259,16 @@ def request_bili_api_json(
     timeout: int = 18,
     extra_headers: dict[str, str] | None = None,
 ) -> tuple[dict | None, str | None]:
-    """下载链路专用：curl CLI 优先（可 kill、超时可控），跳过 curl_cffi。"""
-    seconds = _timeout_seconds(timeout)
-    last_err = ""
+    """下载/搜索链路：curl CLI + 重试。"""
+    from backend.services.curl_utils import curl_get_json
 
-    if extra_headers:
-        cmd = [
-            "curl", "-sS", "-4", *curl_no_proxy_args(),
-            "--connect-timeout", str(min(8, seconds)),
-            "--max-time", str(seconds),
-            "-H", f"User-Agent: {_DEFAULT_HEADERS['User-Agent']}",
-            "-H", f"Accept: {_DEFAULT_HEADERS['Accept']}",
-        ]
-        for key, val in {**_DEFAULT_HEADERS, **extra_headers}.items():
-            if key.lower() in ("user-agent", "accept"):
-                continue
-            cmd.extend(["-H", f"{key}: {val}"])
-        if cookie:
-            cmd.extend(["-H", f"Cookie: {cookie}"])
-        cmd.append(full_url)
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=seconds + 5, env=sanitize_env(),
-            )
-            if result.returncode == 0:
-                data, err = _parse_json_response(result.stdout, transport="curl")
-                if data is not None:
-                    return data, None
-                last_err = err or "curl: 非 JSON"
-            else:
-                last_err = (result.stderr or result.stdout or f"exit {result.returncode}").strip()[:200]
-        except subprocess.TimeoutExpired:
-            last_err = "curl: 超时"
-        except Exception as e:
-            last_err = f"curl: {e}"
-        if not _is_retryable_bili_api_err(last_err):
-            return None, last_err
-        # 网络抖动时仅重试一次
-        data, err = _request_url_curl_cli(full_url, cookie, timeout)
-        return (data, None) if data is not None else (None, err or last_err)
-
-    for attempt in range(2):
-        data, err = _request_url_curl_cli(full_url, cookie, timeout)
-        if data is not None:
-            return data, None
-        last_err = err or last_err
-        if not _is_retryable_bili_api_err(err or ""):
-            break
-    return None, last_err
+    return curl_get_json(
+        full_url,
+        cookie=cookie,
+        headers=extra_headers,
+        timeout=timeout,
+        retries=3,
+    )
 
 
 def _request_json_url(
@@ -343,9 +305,11 @@ def get_mixin_key(*, force_refresh: bool = False, cookie: str = "") -> tuple[str
     if cached and not force_refresh and now - float(_wbi_cache.get("fetched_at") or 0) < _WBI_CACHE_TTL:
         return cached, None
 
+    from backend.services.curl_utils import curl_get_json
+
     last_err = ""
     for attempt in range(_NAV_RETRY_MAX):
-        data, err = _request_json_url(NAV_URL, cookie=cookie, timeout=_NAV_TIMEOUT)
+        data, err = curl_get_json(NAV_URL, cookie=cookie, timeout=_NAV_TIMEOUT, retries=2)
         if data is not None:
             img_key, sub_key = _extract_wbi_from_nav(data)
             if img_key and sub_key:

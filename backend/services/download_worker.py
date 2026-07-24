@@ -35,7 +35,8 @@ def main() -> None:
     if not ok and is_valid_local_video(output_path):
         ok, err, skip = True, "", False
 
-    print(json.dumps({"ok": ok, "err": err or "", "skip": skip, "elapsed_ms": elapsed_ms}, ensure_ascii=False))
+    result = {"ok": ok, "err": err or "", "skip": skip, "elapsed_ms": elapsed_ms}
+    print(json.dumps(result, ensure_ascii=False), flush=True)
     sys.exit(0 if ok else 1)
 
 

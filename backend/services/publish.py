@@ -77,14 +77,20 @@ def _cli_error_detail(output: str) -> str:
     text = (output or "").strip()
     if not text:
         return "CLI 无输出"
+    # 嵌套 JSON 常见：apply_media_upload ... {"message":"token is expired","retcode":100051}
+    if "token is expired" in text or "retcode\":100051" in text or "retcode=100051" in text:
+        return "账号 Token 已过期，请重新登录"
+    if "retCode=8011" in text or '"retCode":8011' in text:
+        return "鉴权失败（retCode=8011），账号可能未登录或 Token 已过期"
     for pattern in (
-        r'"message"\s*:\s*"([^"]+)"',
-        r'"msg"\s*:\s*"([^"]+)"',
+        r'\\"message\\"\s*:\s*\\"([^\\"]+)\\"',
+        r'"message"\s*:\s*"((?:\\.|[^"\\])*)"',
+        r'"msg"\s*:\s*"((?:\\.|[^"\\])*)"',
         r"错误码\s*\d+\s*[：:]\s*([^\n\"]+)",
     ):
         m = re.search(pattern, text)
         if m:
-            return m.group(1).strip()[:160]
+            return m.group(1).replace('\\"', '"').strip()[:160]
     for line in reversed(text.splitlines()):
         line = line.strip()
         if not line or "NotOpenSSLWarning" in line:
@@ -92,6 +98,17 @@ def _cli_error_detail(output: str) -> str:
         if any(k in line for k in ("error", "Error", "错误", "失败", "code")):
             return line[:160]
     return text[-160:]
+
+
+def _is_token_expired_output(output: str) -> bool:
+    text = output or ""
+    return (
+        "token is expired" in text
+        or "retcode\":100051" in text
+        or "retcode=100051" in text
+        or "retCode=8011" in text
+        or '"retCode":8011' in text
+    )
 
 
 def _publish_timeout_sec(video_path: str) -> int:
@@ -115,11 +132,12 @@ def publish_video(
     """
     发布视频到腾讯频道
     返回 (success, error_type, detail):
-    error_type 为 "" | "rate_limit" | "oidb_limit" | "permission" | "banned" | "other"
+    error_type 为 "" | "rate_limit" | "oidb_limit" | "permission" | "banned"
+    | "token_expired" | "bot_abnormal" | "content_rejected" | "other"
     """
     token = get_token(account_id)
     if not token:
-        return False, "other", "账号 Token 无效"
+        return False, "token_expired", "账号 Token 无效"
 
     body = prepare_publish_content(content, include_topics=include_topics)
     cmd = [
@@ -146,6 +164,8 @@ def publish_video(
         if result.returncode == 0 and ('"feed_id"' in output or '"id"' in output):
             return True, "", ""
         detail = _cli_error_detail(output)
+        if _is_token_expired_output(output):
+            return False, "token_expired", detail or "账号 Token 已过期，请重新登录"
         if '"code":20063' in output or "错误码 20063" in output:
             return False, "rate_limit", detail
         if '"code":153' in output:
@@ -154,6 +174,12 @@ def publish_video(
             return False, "permission", detail
         if "错误码 890500" in output or '"code":890500' in output:
             return False, "banned", detail
+        if (
+            '"retcode":100063' in output
+            or "retcode=100063" in output
+            or "robot status is not normal" in output
+        ):
+            return False, "bot_abnormal", detail
         if '"code":10000' in output or "错误码 10000" in output:
             return False, "content_rejected", detail
         return False, "other", detail

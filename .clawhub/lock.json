@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "tencent-channel-community": {
+      "version": "1.1.5",
+      "installedAt": 1783991591373,
+      "ownerHandle": "tencent-adm"
+    }
+  }
+}

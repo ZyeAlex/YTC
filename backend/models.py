@@ -61,7 +61,8 @@ class TaskUpdateRequest(BaseModel):
     task_type: str = Field(..., pattern="^(once|recurring|custom)$")
     videos: list[VideoRef] = Field(..., min_length=1)
     channels: list[ChannelRef]
-    account_ids: list[str] = Field(..., min_length=1)
+    account_types: list[str] = Field(default_factory=list)  # qq / bot
+    account_ids: list[str] = Field(default_factory=list)  # 兼容旧客户端
     schedule_cron: str = Field(default="")
     search_sort: str = Field(default="recent", pattern="^(default|recent)$")
     source: str = Field(default="search", pattern="^(search|collection|manual)$")
@@ -78,7 +79,8 @@ class TaskCreateRequest(BaseModel):
     task_type: str = Field(default="once", pattern="^(once|recurring|custom)$")
     videos: list[VideoRef] = Field(default_factory=list)
     channels: list[ChannelRef]
-    account_ids: list[str] = Field(default_factory=list)
+    account_types: list[str] = Field(default_factory=list)  # qq / bot
+    account_ids: list[str] = Field(default_factory=list)  # 兼容旧客户端
     schedule_cron: str = Field(default="")
     search_sort: str = Field(default="recent", pattern="^(default|recent)$")
     source: str = Field(default="search", pattern="^(search|collection|manual)$")

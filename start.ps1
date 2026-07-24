@@ -28,15 +28,159 @@ function Test-CommandExists($Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-function Ensure-Uv {
-    if (Test-CommandExists "uv") { return }
-    Write-Host "→ 未检测到 uv，正在安装..."
-    irm https://astral.sh/uv/install.ps1 | iex
-    $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
-    if (-not (Test-CommandExists "uv")) {
-        Write-Host "✗ uv 安装失败，请手动安装: https://docs.astral.sh/uv/"
-        exit 1
+function Enable-Tls12 {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = `
+            [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
+    } catch {}
+}
+
+function Enable-InsecureSsl {
+    # 部分 Windows 环境（公司代理/缺根证书）会导致 irm/IWR SSL 校验失败
+    Enable-Tls12
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]"InsecureSslCallback").Type) {
+            Add-Type @"
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public static class InsecureSslCallback {
+  public static void Enable() {
+    ServicePointManager.ServerCertificateValidationCallback =
+      delegate { return true; };
+  }
+}
+"@
+        }
+        [InsecureSslCallback]::Enable()
+    } catch {}
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]"TrustAllCertsPolicy").Type) {
+            Add-Type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCertsPolicy : ICertificatePolicy {
+  public bool CheckValidationResult(
+    ServicePoint s, X509Certificate c, WebRequest r, int p) { return true; }
+}
+"@
+        }
+        [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    } catch {}
+}
+
+function Invoke-WebDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$OutFile
+    )
+    Enable-InsecureSsl
+    $params = @{
+        Uri             = $Uri
+        OutFile         = $OutFile
+        UseBasicParsing = $true
     }
+    # PowerShell 7+
+    if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("SkipCertificateCheck")) {
+        $params.SkipCertificateCheck = $true
+    }
+    Invoke-WebRequest @params
+}
+
+function Refresh-UvPath {
+    $env:PATH = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\uv;$env:PATH"
+}
+
+function Install-UvFromZip {
+    param([string]$Url)
+    $zip = Join-Path $env:TEMP "uv-win.zip"
+    $extract = Join-Path $env:TEMP "uv-win-extract"
+    $destDir = Join-Path $env:USERPROFILE ".local\bin"
+    Write-Host "  尝试直接下载: $Url"
+    Invoke-WebDownload -Uri $Url -OutFile $zip
+    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $extract | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $extract -Force
+    $uvExe = Get-ChildItem -Path $extract -Filter "uv.exe" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $uvExe) { throw "压缩包内未找到 uv.exe" }
+    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+    Copy-Item $uvExe.FullName (Join-Path $destDir "uv.exe") -Force
+    $uvx = Get-ChildItem -Path $extract -Filter "uvx.exe" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($uvx) {
+        Copy-Item $uvx.FullName (Join-Path $destDir "uvx.exe") -Force
+    }
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+    Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+    Refresh-UvPath
+}
+
+function Ensure-Uv {
+    Refresh-UvPath
+    if (Test-CommandExists "uv") { return }
+
+    Write-Host "→ 未检测到 uv，正在安装..."
+    Enable-InsecureSsl
+
+    # 1) 官方安装脚本
+    try {
+        Write-Host "  方式 1/3: astral.sh 安装脚本"
+        $script = (Invoke-WebRequest -Uri "https://astral.sh/uv/install.ps1" -UseBasicParsing).Content
+        Invoke-Expression $script
+        Refresh-UvPath
+        if (Test-CommandExists "uv") {
+            Write-Host "✓ uv 已安装 ($(uv --version 2>$null))"
+            return
+        }
+    } catch {
+        Write-Host "  官方脚本失败: $($_.Exception.Message)"
+    }
+
+    # 2) 直接下载 Windows 二进制（含国内镜像）
+    $zipUrls = @(
+        "https://ghfast.top/https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
+        "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+    )
+    foreach ($url in $zipUrls) {
+        try {
+            Write-Host "  方式 2/3: 下载预编译包"
+            Install-UvFromZip -Url $url
+            if (Test-CommandExists "uv") {
+                Write-Host "✓ uv 已安装 ($(uv --version 2>$null))"
+                return
+            }
+        } catch {
+            Write-Host "  下载失败: $($_.Exception.Message)"
+        }
+    }
+
+    # 3) 本机已有 Python 时用 pip
+    try {
+        Write-Host "  方式 3/3: pip 安装"
+        $py = $null
+        foreach ($c in @("python", "py")) {
+            if (Test-CommandExists $c) { $py = $c; break }
+        }
+        if ($py) {
+            if ($py -eq "py") {
+                & py -3 -m pip install -U uv --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host mirrors.aliyun.com
+            } else {
+                & python -m pip install -U uv --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host mirrors.aliyun.com
+            }
+            Refresh-UvPath
+            if (Test-CommandExists "uv") {
+                Write-Host "✓ uv 已安装 ($(uv --version 2>$null))"
+                return
+            }
+        }
+    } catch {
+        Write-Host "  pip 安装失败: $($_.Exception.Message)"
+    }
+
+    Write-Host "✗ uv 安装失败。可手动下载: https://github.com/astral-sh/uv/releases"
+    Write-Host "  解压 uv.exe 到 %USERPROFILE%\.local\bin 后重新运行本脚本"
+    exit 1
 }
 
 function Ensure-Node {
@@ -57,7 +201,7 @@ function Ensure-Node {
     $tmpZip = Join-Path $env:TEMP $zipName
     $toolsDir = Join-Path $Root ".tools"
 
-    Invoke-WebRequest -Uri $url -OutFile $tmpZip -UseBasicParsing
+    Invoke-WebDownload -Uri $url -OutFile $tmpZip
     if (Test-Path $ToolsNode) { Remove-Item $ToolsNode -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
     Expand-Archive -Path $tmpZip -DestinationPath $toolsDir -Force
